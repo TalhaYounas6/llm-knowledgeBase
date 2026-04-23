@@ -1,5 +1,6 @@
 import { createRequire } from 'module';
 import bcrypt, { genSalt } from "bcrypt";
+import { encrypt } from '../../utils/crypto';
 const require = createRequire(import.meta.url);
 const {User} = require("../../models/index.cjs");
 
@@ -15,8 +16,8 @@ export const registerUser = async(username,email,password,customLLMKey=null)=>{
 
     let encryptedKey = null;
     if (customLLMKey) {
-        // will write an encrypt() function later using Node's  crypto module
-        // encryptedKey = encrypt(customLLMKey); 
+        
+        encryptedKey = encrypt(customLLMKey);
     }
 
 
@@ -24,4 +25,21 @@ export const registerUser = async(username,email,password,customLLMKey=null)=>{
     
 
     return newUser;
+}
+
+export const loginUser = async(email,password)=>{
+    const user = User.findOne({where: {email},raw:true});
+
+    if(!user){
+        throw new Error("Invalid Email or Password!");
+    }
+
+    const isMatch = bcrypt.compare(user.password_hash,password);
+
+    if(isMatch){
+        return user;
+    }else{
+        throw new Error("Invalid email or password");
+    }
+
 }
