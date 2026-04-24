@@ -18,6 +18,7 @@ if (process.argv[1] === __filename) {
   const startServer = async () => {
     try {
          await sequelize.authenticate();
+         console.log('Connection to PostgreSQL has been established successfully.');
          
       server.listen(port, () => {
         console.log(`App is listening on port ${port}`);

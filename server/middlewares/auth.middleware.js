@@ -1,7 +1,7 @@
 import asyncHandler from "express-async-handler";
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const { User } = require("../../models/index.cjs");
+const { User } = require("../models/index.cjs");
 
  export const protect = asyncHandler(async(req,res,next)=>{
 

@@ -1,9 +1,9 @@
-import asyncHandler from "express-async-handler";
-import { getUserStatus } from "../../services/user/index.js";
+import express from "express"
+import { getStatusController } from "../../controllers/user/index.js";
+import {protect} from "../../middlewares/auth.middleware.js"
 
-export const getStatusController = asyncHandler(async(req,res)=>{
-    const status = await getUserStatus(req.user.id);
+const router = express.Router();
 
-    return res.status(200).json(status)
+router.get('/get-status',protect,getStatusController);
 
-})
+export default router;

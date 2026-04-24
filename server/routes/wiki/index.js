@@ -1,33 +1,11 @@
-import asyncHandler from "express-async-handler";
-import { ingestFileService,queryWikiService } from "../../services/wiki/index.js";
+import express from "express"
+import { protect } from "../../middlewares/auth.middleware.js";
+import { ingestController, queryWikiController } from "../../controllers/wiki/index.js";
+import { upload } from "../../utils/multer.js";
 
-export const ingestController = asyncHandler(async(req,res)=>{
-    
-    if(!req.file){
-        const error = new Error("No file provided!")
-        error.statusCode = 400
-        return next(error);
-    }
+const router = express.Router();
 
-    const result = await ingestFileService(req.user.id,req.file);
+router.post('/ingest',protect,upload.single('document'),ingestController);
+router.post('/query',protect,queryWikiController)
 
-    res.status(202).json(result);
-
-})
-
-
-export const queryWikiController = asyncHandler(async(req,res)=>{
-
-    const {question,context} = req.body;
-
-    if(!question){
-        const error = new Error("No question provided");
-        error.statusCode = 400;
-        return next(error);
-    }
-
-    const result = await queryWikiService(req.user.id, question, context);
-
-    res.status(202).json(result);
-
-})
+export default router;

@@ -1,6 +1,6 @@
 import { createRequire } from 'module';
 import bcrypt, { genSalt } from "bcrypt";
-import { encrypt } from '../../utils/crypto';
+import { encrypt } from '../../utils/crypto.js';
 const require = createRequire(import.meta.url);
 const {User} = require("../../models/index.cjs");
 

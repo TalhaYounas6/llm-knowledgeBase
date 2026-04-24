@@ -1,8 +1,8 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { User, IngestJob } = require("../../models/index.cjs");
-import { getQueueChannel } from '../../config/rabbitMqueue';
-import { Json } from 'sequelize/lib/utils';
+import { getQueueChannel } from '../../config/rabbitMqueue.js';
+
 
 
 export const ingestFileService = async (userId, file) => {
