@@ -48,18 +48,14 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: "free",
       },
-      requests_this_month: {
-        type: Sequelize.INTEGER,
-        allowNull: false,
-        defaultValue: 0,
-        
-      },
-      max_requests: {
-        type: Sequelize.INTEGER,
-        allowNull: false,
-        defaultValue: 50,
-
-      },
+      requests_today: {
+            type: DataTypes.INTEGER,
+            defaultValue: 0
+        },
+        daily_limit: {
+            type: DataTypes.INTEGER,
+            defaultValue: 2 
+        },
       custom_llm_provider: {
         type: Sequelize.STRING,
         allowNull: true,

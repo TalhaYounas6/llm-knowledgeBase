@@ -9,11 +9,11 @@ export const ingestFileService = async (userId, file) => {
     // 1. Increment user's usage quota in DB
     const user = await User.findByPk(userId);
 
-    if (user.tier =='free' && user.requests_this_month>=user.max_requests){
+    if (user.tier =='free' && user.requests_today>=user.daily_limit){
         throw new Error("Monthly quota exceeded")
     }
 
-    user.requests_this_month = user.requests_this_month + 1;
+    user.requests_today = user.daily_limit + 1;
     await user.save()
     // 2. Add job to IngestJobs table (status: 'pending')
     const newJob = await IngestJob.create({
@@ -47,11 +47,11 @@ export const queryWikiService = async (userId, question, localContext) => {
     const user = await User.findByPk(userId);
     if(!user) throw new Error("User not found");
 
-    if (user.tier == "free" && user.requests_this_month >= user.max_requests){
+    if (user.tier == "free" && user.requests_today >= user.daily_limit){
         throw new Error("Monthly quota exceeded");
     }
 
-    user.requests_this_month = user.requests_this_month + 1;
+    user.requests_today = user.requests_today + 1;
     await user.save()
 
     // 2. Drop the question + context into RabbitMQ
@@ -71,3 +71,34 @@ export const queryWikiService = async (userId, question, localContext) => {
     }
 }
 
+export const jobStatus = async(jobId)=>{
+
+    const job = await IngestJob.findOne({where:{id:jobId,userId:req.user.id}});
+
+    if(!job){
+        throw new Error("No job exists!")
+    }
+
+    // deleting file that has completed processing
+    if (job.status === 'completed' || job.status === 'failed') {
+        await IngestJob.destroy({ where: { id: job.id } });
+    }
+
+    return job;
+}
+
+
+export const completeJob = async(id,status,markdown_result)=>{
+
+    const job = await IngestJob.findOne({where:{id:jobId}});
+
+    if(!job){
+        throw new Error("No job exists.")
+    }
+
+    job.status= status;
+    job.markdown_result = markdown_result;
+
+    await job.save();
+    
+}

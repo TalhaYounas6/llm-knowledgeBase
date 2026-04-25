@@ -3,7 +3,7 @@ import { loginController, registerController } from "../../controllers/auth/inde
 
 const router = express.Router();
 
-router.post('/register',registerController);
-router.post('/login',loginController)
+router.post('/auth/register',registerController);
+router.post('/auth/login',loginController)
 
 export default router;

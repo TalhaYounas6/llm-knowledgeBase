@@ -47,6 +47,7 @@ module.exports = (sequelize, DataTypes) => {
           isIn: [["pending", "processing", "completed", "failed"]],
         },
       },
+      markdown_result: { type: Sequelize.TEXT, allowNull: true },
       error_message: {
         type: Sequelize.TEXT,
         allowNull: true,
