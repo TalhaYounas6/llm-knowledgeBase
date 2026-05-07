@@ -2,7 +2,8 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { User, IngestJob } = require("../../models/index.cjs");
 import { getQueueChannel } from '../../config/rabbitMqueue.js';
-import { model } from '../../config/gemini.js';
+import { chatAi} from '../../config/gemini.js';
+import { decrypt } from '../../utils/crypto.js';
 
 
 
@@ -31,6 +32,7 @@ export const ingestFileService = async (userId, file) => {
         jobId: newJob.id,
         filePath: file.path,
         original_filename: file.originalname,
+        userApiKey: decrypt(user.encrypted_custom_key)
     }
 
     queue.sendToQueue('pdf_jobs',Buffer.from(JSON.stringify(jobTicket)),{ persistent: true});
@@ -52,6 +54,8 @@ export const queryWikiService = async (userId, question, localContext) => {
         throw new Error("Monthly quota exceeded");
     }
 
+    const key = decrypt(user.encrypted_custom_key);
+    const model = chatAi(key);
     const prompt = `
     You are a personal knowledge assistant. Below is the entire context of the user's personal wiki notes.
     Use this context to answer the question as accurately as possible. 

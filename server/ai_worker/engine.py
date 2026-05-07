@@ -4,12 +4,12 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from markitdown import MarkItDown
 
-load_dotenv(dotenv_path="../.env")
+# load_dotenv(dotenv_path="../.env")
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
-    temperature=0.2
-)
+# llm = ChatGoogleGenerativeAI(
+#     model="gemini-2.5-flash",
+#     temperature=0.2
+# )
 
 schema_prompt = ChatPromptTemplate.from_messages([
     ("system", """
@@ -37,7 +37,13 @@ def extract_text_from_file(file_path):
         print(f"Error reading file {file_path}: {e}")
         return None
 
-def processDocument(file_path):
+def processDocument(file_path,userKey):
+    llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    google_api_key=userKey,
+    temperature=0.2
+    )
+
     text_document = extract_text_from_file(file_path)
 
     if not text_document:

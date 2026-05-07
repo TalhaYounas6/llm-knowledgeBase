@@ -20,6 +20,7 @@ def callback(ch,method,properties,body):
     ticket = json.loads(body)
     jobId = ticket.get("jobId")
     originalFileName = ticket.get("original_filename")
+    userKey = ticket.get("userApiKey")
     
 
     relative_file_path = ticket.get("filePath")
@@ -29,7 +30,7 @@ def callback(ch,method,properties,body):
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(processDocument,file_path)
+            future = executor.submit(processDocument,file_path,userKey)
 
             markdown_result = future.result(PROCESS_TIMEOUT_DURATION)
 
