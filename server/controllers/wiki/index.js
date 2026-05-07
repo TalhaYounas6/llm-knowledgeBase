@@ -35,7 +35,7 @@ export const queryWikiController = asyncHandler(async(req,res)=>{
 export const getJobStatusController = asyncHandler(async(req,res)=>{
     const {jobId} = req.params;
 
-    const job = await jobStatus(jobId);
+    const job = await jobStatus(jobId,req.user.id);
 
     return res.status(200).json({
         id: job.id,

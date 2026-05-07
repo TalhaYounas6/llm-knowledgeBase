@@ -2,6 +2,7 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { User, IngestJob } = require("../../models/index.cjs");
 import { getQueueChannel } from '../../config/rabbitMqueue.js';
+import { model } from '../../config/gemini.js';
 
 
 
@@ -13,7 +14,7 @@ export const ingestFileService = async (userId, file) => {
         throw new Error("Monthly quota exceeded")
     }
 
-    user.requests_today = user.daily_limit + 1;
+    user.requests_today = user.requests_today + 1;
     await user.save()
     // 2. Add job to IngestJobs table (status: 'pending')
     const newJob = await IngestJob.create({
@@ -51,38 +52,52 @@ export const queryWikiService = async (userId, question, localContext) => {
         throw new Error("Monthly quota exceeded");
     }
 
-    user.requests_today = user.requests_today + 1;
-    await user.save()
+    const prompt = `
+    You are a personal knowledge assistant. Below is the entire context of the user's personal wiki notes.
+    Use this context to answer the question as accurately as possible. 
+    If the answer isn't in the context, say you don't know. Do not make up information or try to create information
+    that is not in the context.
 
-    // 2. Drop the question + context into RabbitMQ
-    const queue = await getQueueChannel();
-     const queryTicket = {
-        userId : user.id,
-        question : question,
-        context : localContext
-     }
+    CONTEXT:
+    ${localContext}
 
-     queue.sendToQueue("query_jobs",Buffer.from(JSON.stringify(queryTicket)),{ persistent:true})
+    QUESTION:
+    ${question}
+    `;
 
-    // 3. Return a success message
-    return {
-        message : "Query added to queue Successfully",
-        status:"processing"
+    try {
+
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+
+        user.requests_today = user.requests_today + 1;
+        await user.save();
+
+        return {
+            answer: text,
+            status : "success"
+        }
+        
+    } catch (error) {
+        console.error("Gemini Query Error:", error);
+        throw new Error("AI failed to process your question.");
     }
+
 }
 
-export const jobStatus = async(jobId)=>{
+export const jobStatus = async(jobId,userId)=>{
 
-    const job = await IngestJob.findOne({where:{id:jobId,userId:req.user.id}});
+    const job = await IngestJob.findOne({where:{id:jobId,userId:userId}});
 
     if(!job){
         throw new Error("No job exists!")
     }
 
-    // deleting file that has completed processing
-    if (job.status === 'completed' || job.status === 'failed') {
-        await IngestJob.destroy({ where: { id: job.id } });
-    }
+
+    // if (job.status === 'completed' || job.status === 'failed') {
+    //     await IngestJob.destroy({ where: { id: job.id } });
+    // }
 
     return job;
 }
@@ -90,7 +105,7 @@ export const jobStatus = async(jobId)=>{
 
 export const completeJob = async(id,status,markdown_result)=>{
 
-    const job = await IngestJob.findOne({where:{id:jobId}});
+    const job = await IngestJob.findOne({where:{id:id}});
 
     if(!job){
         throw new Error("No job exists.")
