@@ -55,8 +55,7 @@ def callback(ch,method,properties,body):
             "status" : "failed"
         })
 
-        print(f"Server Response Code: {res.status_code}")
-        print(f"Server Response Text: {res.text}")
+        
     finally:
         ch.basic_ack(delivery_tag = method.delivery_tag);
         if(os.path.exists(file_path)):
