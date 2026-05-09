@@ -35,33 +35,36 @@ def callback(ch,method,properties,body):
             markdown_result = future.result(PROCESS_TIMEOUT_DURATION)
 
             payload = {
-                "status" : "Completed",
+                "status" : "completed",
                 "markdown_result" : markdown_result
             }
 
-            res = requests.put(f"{SERVER_URL}/{jobId}", json=payload)
+            res = requests.put(f"{SERVER_URL}/wiki/internal/job/{jobId}", json=payload)
             if res.status_code == 200:
                 print(f"Job completed Successfully")
             else:
                 print(f"Job was not successful : {res.text}")
     except concurrent.futures.TimeoutError:
         print(f"AI took too long to generate an output for job: {jobId}")
-        requests.put(f"{SERVER_URL}/{jobId}", json = {
-            "status" : "Failed"
+        requests.put(f"{SERVER_URL}/wiki/internal/job/{jobId}", json = {
+            "status" : "failed"
         })
     except Exception as e:
         print(f"AI processing failed for job {jobId} : {e}")
-        requests.put(f"{SERVER_URL}/{jobId}",json={
-            "status" : "Failed"
+        requests.put(f"{SERVER_URL}/wiki/internal/job/{jobId}",json={
+            "status" : "failed"
         })
+
+        print(f"Server Response Code: {res.status_code}")
+        print(f"Server Response Text: {res.text}")
     finally:
         ch.basic_ack(delivery_tag = method.delivery_tag);
         if(os.path.exists(file_path)):
-            os.path.remove(file_path)        
+            os.remove(file_path)        
             # Remove file after processing from server
             print("Cleaned up temporary file")
 
-    def start_worker():
+def start_worker():
         print("AI worker starting up...")
 
         parameters = pika.URLParameters(RABBITMQ_URL)
@@ -83,7 +86,7 @@ def callback(ch,method,properties,body):
         finally:
             connection.close()
 
-    if __name__ == "__main__":
+if __name__ == "__main__":
         time.sleep(2) 
         start_worker()           
 

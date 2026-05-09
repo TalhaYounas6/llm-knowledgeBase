@@ -7,7 +7,7 @@ const router = express.Router();
 
 router.post('/wiki/ingest',protect,upload.single('document'),ingestController);
 router.post('/wiki/query',protect,queryWikiController);
-router.get('/wiki/job/:jobId',protect,getJobStatusController);
+router.get('/wiki/job/:jobId',protect,getJobStatusController); 
 // for the python worker
 router.put('/wiki/internal/job/:jobId',completeJobController);
 

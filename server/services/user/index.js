@@ -10,6 +10,8 @@ export const getUserStatus = async (userId) => {
         throw new Error("User not found");
     }
 
+    console.log("User: ",user);
+
     return {
         username: user.username,
         tier: user.tier,

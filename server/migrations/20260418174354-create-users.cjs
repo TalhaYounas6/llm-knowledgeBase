@@ -43,10 +43,6 @@ module.exports = {
         allowNull: false,
         defaultValue: 50,
       },
-      custom_llm_provider: {
-        type: Sequelize.STRING,
-        allowNull: true,
-      },
       encrypted_custom_key: {
         type: Sequelize.TEXT,
         allowNull: true,

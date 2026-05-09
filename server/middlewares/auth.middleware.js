@@ -7,12 +7,12 @@ const { User } = require("../models/index.cjs");
 
     let token;
 
-    if(req.headers.authorization && req.headers.authorization.startswith('Bearer')){
+    if(req.headers.authorization && req.headers.authorization.startsWith('Bearer')){
         try {
 
             token = req.headers.authorization.split(" ")[1];
 
-        const user = await User.findOne({where:{api_key:token},raw:true});
+            const user = await User.findOne({where:{api_key:token},raw:true});
 
         if(!user){
             res.status(401);

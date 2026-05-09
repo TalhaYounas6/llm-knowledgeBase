@@ -1,5 +1,6 @@
 "use strict";
 const { Model, Sequelize } = require("sequelize");
+const crypto = require('crypto');
 
 module.exports = (sequelize, DataTypes) => {
   class User extends Model {
@@ -54,13 +55,8 @@ module.exports = (sequelize, DataTypes) => {
         },
         daily_limit: {
             type: DataTypes.INTEGER,
-            defaultValue: 2 
+            defaultValue: 5 
         },
-      custom_llm_provider: {
-        type: Sequelize.STRING,
-        allowNull: true,
-        
-      },
       encrypted_custom_key: {
         type: Sequelize.TEXT,
         allowNull: true,
@@ -82,10 +78,11 @@ module.exports = (sequelize, DataTypes) => {
       modelName: "User",
       
       hooks: {
-        beforeCreate: async (user) => {
-          user.api_key = `wiki_sk_${gen_random_uuid().replace(/-/g, '')}`;
-        },
+      beforeCreate: async (user) => {
+        const rawUuid = crypto.randomUUID().replace(/-/g, '');
+        user.api_key = `wiki_sk_${rawUuid}`;
       },
+    },
     }
   );
 

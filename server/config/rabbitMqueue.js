@@ -1,4 +1,5 @@
 import amqp from "amqplib"
+import "dotenv/config";
 
 let channel = null;
 
@@ -7,11 +8,11 @@ export const getQueueChannel = async ()=>{
 
     try {
 
-        const connection = amqp.connect(process.env.QUEUE_URL);
+        const connection = await amqp.connect(process.env.QUEUE_URL);
         channel = await connection.createChannel();
 
         await channel.assertQueue("pdf_jobs",{durable:true});
-        await channel.assertQueue("query_jobs",{durable:true});
+        
 
         console.log("Connected to rabbit queue.")
 

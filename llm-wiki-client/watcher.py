@@ -2,7 +2,8 @@ import os
 import time
 import json
 import requests
-import getpass
+# import getpass
+import pwinput
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -31,7 +32,7 @@ def get_local_key():
 def verify_token(api_key):
     try:
         headers = {"Authorization": f"Bearer {api_key}"}
-        res = requests.get(f"{SERVER_URL}/user/status", headers=headers)
+        res = requests.get(f"{SERVER_URL}/user/get-status", headers=headers)
         if res.status_code == 200:
             print(f"Authenticated! Daily Quota: {res.json().get('usage')}")
             return True
@@ -50,7 +51,6 @@ def poll_for_result(job_id, api_key, original_filename):
         try:
             # Tap the server on the shoulder
             res = requests.get(f"{SERVER_URL}/wiki/job/{job_id}", headers=headers)
-            
             if res.status_code == 200:
                 job_data = res.json()
                 status = job_data.get('status')
@@ -99,7 +99,7 @@ def action_login():
 
     # 2. Manual Login Fallback
     email = input("Email: ")
-    password = getpass.getpass("Password: ") 
+    password = pwinput.pwinput(prompt="Password: ", mask="*")
 
     try:
         response = requests.post(f"{SERVER_URL}/auth/login", json={"email": email, "password": password})
@@ -119,9 +119,9 @@ def action_register():
     print("\n--- REGISTER ---")
     username = input("Username: ")
     email = input("Email: ")
-    password = getpass.getpass("Password: ")
+    password = pwinput.pwinput(prompt="Password: ", mask="*")
     
-    custom_key = getpass.getpass("Enter API Key (It is recommended to get your own free Gemini api key from google studio): ")
+    custom_key = pwinput.pwinput(prompt="Enter API Key (It is recommended to get your own free Gemini api key from google studio): ",mask='*')
     
     payload = {"username": username, "email": email, "password": password}
     if custom_key.strip():
@@ -145,7 +145,7 @@ def action_change_key():
     print("\n--- CHANGE CUSTOM LLM KEY ---")
     print("Please verify your account first.")
     email = input("Email: ")
-    password = getpass.getpass("Password: ")
+    password = pwinput.pwinput(prompt="Password: ", mask="*")
 
     try:
         # 1. Login to get the API Key 
@@ -159,7 +159,7 @@ def action_change_key():
         save_local_key(api_key) # Refresh 
         
         # 2. Prompt for the new custom key
-        new_custom_key = input("Enter your new custom Key: ")
+        new_custom_key = pwinput.pwinput(prompt="Enter your API Key: ", mask="*")
         
         # 3. Hit the update route
         headers = {"Authorization": f"Bearer {api_key}"}
