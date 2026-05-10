@@ -2,22 +2,21 @@ import os
 import time
 import json
 import requests
-# import getpass
 import pwinput
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# --- CONFIGURATION ---
+# CONFIGURATION
 SERVER_URL = "http://localhost:3000"
 CONFIG_FILE = "config.json"
 INPUT_FOLDER = "./Raw_Sources"
 OUTPUT_FOLDER = "./Wiki_Notes"
+ALLOW_DEFAULT_LLM = False  
 
-# Ensure both directories exist
 os.makedirs(INPUT_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# --- HELPER FUNCTIONS ---
+# HELPER FUNCTIONS
 def save_local_key(api_key):
     with open(CONFIG_FILE, "w") as f:
         json.dump({"api_key": api_key}, f)
@@ -39,67 +38,79 @@ def verify_token(api_key):
         return False
     except requests.exceptions.ConnectionError:
         print("Check your internet connection.")
-        exit(1)
+        return False
 
-# --- POLLING LOGIC ---
+# Input Wrapper
+def ask_user(prompt_text, is_password=False):
+    """Wraps inputs to always allow 'back' or 'cancel'."""
+    display_prompt = f"{prompt_text} (or type 'back'): "
+    
+    while True:
+        if is_password:
+            val = pwinput.pwinput(prompt=display_prompt, mask="*")
+        else:
+            val = input(display_prompt)
+            
+        val = val.strip()
+
+        if val.lower() in ['back', 'cancel', 'exit']:
+            print("\nAction cancelled. Returning to menu...")
+            return None
+            
+
+        if not val:
+            print("Input cannot be empty. Please try again.")
+            continue
+            
+        return val
+
+# POLLING LOGIC
 def poll_for_result(job_id, api_key, original_filename):
     print(f"Waiting for AI to process '{original_filename}'...")
-    
     headers = {'Authorization': f'Bearer {api_key}'}
     
     while True:
         try:
-            # Tap the server on the shoulder
             res = requests.get(f"{SERVER_URL}/wiki/job/{job_id}", headers=headers)
             if res.status_code == 200:
                 job_data = res.json()
                 status = job_data.get('status')
                 
                 if status == 'completed':
-                    print(f" AI finished processing '{original_filename}'!")
-                    
-                    # 1. Grab the markdown text
-                    markdown_text = job_data.get('markdown_content', '')
-                    
-                    # 2. Create the new filename (change .pdf to .md)
+                    print(f"AI finished processing '{original_filename}'!")
+                    markdown_text = job_data.get('markdown_result', '')
                     base_name = os.path.splitext(original_filename)[0]
                     new_filepath = os.path.join(OUTPUT_FOLDER, f"{base_name}.md")
                     
-                    # 3. Save it into the Wiki Notes folder
                     with open(new_filepath, "w", encoding="utf-8") as f:
                         f.write(markdown_text)
                         
                     print(f"Saved to {new_filepath}\n")
                     break 
-                    
                 elif status == 'failed':
-                    print(f" AI failed to process '{original_filename}'.")
+                    print(f"AI failed to process '{original_filename}'.")
                     break
-                
-                # If status is 'pending' or 'processing', ijust wait silently
-                
         except requests.exceptions.ConnectionError:
             print("Lost connection to server while waiting...")
             
-        # Wait 5 seconds before asking the server again
         time.sleep(5) 
 
-# --- MENU ACTIONS ---
+# MENU ACTIONS
 def action_login():
     print("\n--- LOGIN ---")
-    
-    # 1. Try Auto-Login first
     local_key = get_local_key()
     if local_key:
         print("Found saved session. Verifying...")
         if verify_token(local_key):
             return local_key
         else:
-            print("Saved session expired or invalid. Please log in manually.")
+            print("Saved session expired. Please log in manually.")
 
-    # 2. Manual Login Fallback
-    email = input("Email: ")
-    password = pwinput.pwinput(prompt="Password: ", mask="*")
+    email = ask_user("Email")
+    if not email: return None 
+    
+    password = ask_user("Password", is_password=True)
+    if not password: return None
 
     try:
         response = requests.post(f"{SERVER_URL}/auth/login", json={"email": email, "password": password})
@@ -117,22 +128,38 @@ def action_login():
 
 def action_register():
     print("\n--- REGISTER ---")
-    username = input("Username: ")
-    email = input("Email: ")
-    password = pwinput.pwinput(prompt="Password: ", mask="*")
+    username = ask_user("Username")
+    if not username: return None
     
-    custom_key = pwinput.pwinput(prompt="Enter API Key (It is recommended to get your own free Gemini api key from google studio): ",mask='*')
+    email = ask_user("Email")
+    if not email: return None
+    
+    password = ask_user("Password", is_password=True)
+    if not password: return None
+
+    if ALLOW_DEFAULT_LLM:
+        print("\n(Optional) Bring your own Gemini API key for unlimited use.")
+        custom_key = ask_user("Custom LLM Key (or type 'skip' to use default)", is_password=True)
+    else:
+        print("\nRequired: You must provide your own Gemini API key to use this tool.")
+        custom_key = ask_user("Custom LLM Key", is_password=True)
+        
+    if not custom_key: return None 
     
     payload = {"username": username, "email": email, "password": password}
-    if custom_key.strip():
-        payload["customLLMKey"] = custom_key.strip()
+    
+    if ALLOW_DEFAULT_LLM:
+        if custom_key.lower() != 'skip':
+            payload["customLLMKey"] = custom_key
+    else:
+        payload["customLLMKey"] = custom_key
 
     try:
         response = requests.post(f"{SERVER_URL}/auth/register", json=payload)
         if response.status_code == 201:
             api_key = response.json().get("apiKey")
             save_local_key(api_key)
-            print("Account created successfully! Credentials saved.")
+            print("Account created successfully!")
             return api_key
         else:
             print(f"Registration failed: {response.json().get('message')}")
@@ -144,26 +171,26 @@ def action_register():
 def action_change_key():
     print("\n--- CHANGE CUSTOM LLM KEY ---")
     print("Please verify your account first.")
-    email = input("Email: ")
-    password = pwinput.pwinput(prompt="Password: ", mask="*")
+    email = ask_user("Email")
+    if not email: return None
+    
+    password = ask_user("Password", is_password=True)
+    if not password: return None
 
     try:
-        # 1. Login to get the API Key 
         login_res = requests.post(f"{SERVER_URL}/auth/login", json={"email": email, "password": password})
-        
         if login_res.status_code != 200:
             print("Invalid email or password.")
             return None
             
         api_key = login_res.json().get("apiKey")
-        save_local_key(api_key) # Refresh 
+        save_local_key(api_key) 
         
-        # 2. Prompt for the new custom key
-        new_custom_key = pwinput.pwinput(prompt="Enter your API Key: ", mask="*")
+        new_custom_key = ask_user("Enter your NEW Gemini API Key", is_password=True)
+        if not new_custom_key: return None
         
-        # 3. Hit the update route
         headers = {"Authorization": f"Bearer {api_key}"}
-        update_res = requests.put(f"{SERVER_URL}/user/key", json={"customKey": new_custom_key.strip()}, headers=headers)
+        update_res = requests.put(f"{SERVER_URL}/user/key", json={"customKey": new_custom_key}, headers=headers)
         
         if update_res.status_code == 200:
             print(f"{update_res.json().get('message')}")
@@ -176,7 +203,7 @@ def action_change_key():
         print("Cannot reach the server.")
         return None
 
-# --- FILE WATCHER LOGIC ---
+# FILE WATCHER LOGIC
 class FileDropHandler(FileSystemEventHandler):
     def __init__(self, api_key):
         self.api_key = api_key
@@ -185,36 +212,29 @@ class FileDropHandler(FileSystemEventHandler):
         if event.is_directory or os.path.basename(event.src_path).startswith('.'):
             return
 
-        time.sleep(1) # buffer
+        time.sleep(1) 
         file_path = event.src_path
         filename = os.path.basename(file_path)
-        print(f"\n Detected new file: {filename}")
+        print(f"\nDetected new file: {filename}")
         
         try:
             with open(file_path, 'rb') as f:
                 files = {'document': f}
                 headers = {'Authorization': f'Bearer {self.api_key}'}
                 
-                print(" Uploading to Cloud Server...")
+                print("Uploading to Cloud Server...")
                 response = requests.post(f"{SERVER_URL}/wiki/ingest", files=files, headers=headers)
                 
                 if response.status_code == 202:
                     print("Server accepted the file! Processing in background...")
                     job_id = response.json().get("jobId")
-                    
                     if job_id:
-                        # Call the polling function right here!
                         poll_for_result(job_id, self.api_key, filename)
-                    else:
-                        print("Server did not return a Job ID.")
                 else:
-                    try:
-                        err_msg = response.json().get('message')
-                    except:
-                        err_msg = response.text
-                    print(f" Server Error: {err_msg}")
+                    err_msg = response.json().get('message', response.text)
+                    print(f"Server Error: {err_msg}")
         except Exception as e:
-            print(f" Upload failed: {e}")
+            print(f"Upload failed: {e}")
 
 def startWatching(api_key):
     event_handler = FileDropHandler(api_key)
@@ -222,34 +242,36 @@ def startWatching(api_key):
     observer.schedule(event_handler, INPUT_FOLDER, recursive=True)
     observer.start()
 
-    print("\n Watcher Started")
-    print(f" Monitoring '{INPUT_FOLDER}' for changes.")
-    print("Press CTRL+C to stop.")
+    print("\nWatcher Started")
+    print(f"Monitoring '{INPUT_FOLDER}' for changes.")
+    print("Press CTRL+C to stop watching and return to menu.")
 
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()
-        print("\n Watcher stopped.")
-    observer.join()        
+        print("\n\nWatcher paused by user.")
+    
+    observer.join() 
+    return  
 
-# --- MAIN BOOT SEQUENCE ---
+# MAIN MENU
 if __name__ == "__main__":
     print("\n===============================")
-    print("    Welcome to WikiSync CLI    ")
+    print("    Welcome to LLM-Wiki CLI    ")
+    print("Based on the idea of LLM Knowledge Bases acting as a Second Brain by Andrej Karpathy")
     print("===============================")
     
-    API_KEY = None
-    
-    while not API_KEY:
-        print("\n Please select an option:")
+    while True:
+        print("\nMAIN MENU")
         print("1) Login & Start")
         print("2) Register & Start")
-        print("3) Change Custom LLM Key & Start")
+        print("3) Change Custom LLM Key")
         print("4) Exit")
         
         choice = input("> ")
+        API_KEY = None
         
         if choice == '1':
             API_KEY = action_login()
@@ -263,5 +285,5 @@ if __name__ == "__main__":
         else:
             print("Invalid choice. Please press 1, 2, 3, or 4.")
             
-    # If successfully complete any flow, start the engine
-    startWatching(API_KEY)
+        if API_KEY and choice in ['1', '2']:
+            startWatching(API_KEY)
