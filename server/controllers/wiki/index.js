@@ -18,21 +18,31 @@ export const ingestController = asyncHandler(async(req,res)=>{
 })
 
 
-export const queryWikiController = asyncHandler(async(req,res)=>{
+export const queryWikiController = asyncHandler(async (req, res) => {
+    const { question, indexText, schemaText, pageContents } = req.body;
 
-    const {question,context} = req.body;
-
-    if(!question){
+    if (!question) {
         const error = new Error("No question provided");
         error.statusCode = 400;
         throw error;
     }
 
-    const result = await queryWikiService(req.user.id, question, context);
+    if (!indexText) {
+        const error = new Error("No wiki index provided");
+        error.statusCode = 400;
+        throw error;
+    }
 
-    res.status(202).json(result);
+    const result = await queryWikiService(
+        req.user.id,
+        question,
+        indexText,
+        schemaText || "",
+        pageContents || {}
+    );
 
-})
+    res.status(200).json(result);
+});
 
 export const getJobStatusController = asyncHandler(async(req,res)=>{
     const {jobId} = req.params;

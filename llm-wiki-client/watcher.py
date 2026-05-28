@@ -427,6 +427,152 @@ def append_to_index(index_entry, category):
     with open(INDEX_PATH, "w", encoding="utf-8") as f:
         f.writelines(new_lines)
 
+# QUERY UTILITIES
+
+def read_local_page(filename):
+    # reads a page from any vault subdirectory by filename without extension
+    path = find_local_page(filename)
+    if path and os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    return None
+
+
+def send_query(api_key, question, page_contents=None):
+    # sends query to server with index, schema, and any pre-loaded page contents
+    with open(INDEX_PATH, "r", encoding="utf-8") as f:
+        index_text = f.read()
+    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+        schema_text = f.read()
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    payload = {
+        "question":     question,
+        "indexText":    index_text,
+        "schemaText":   schema_text,
+        "pageContents": page_contents or {}
+    }
+
+    response = requests.post(
+        f"{SERVER_URL}/wiki/query",
+        json=payload,
+        headers=headers
+    )
+
+    if response.status_code == 200:
+        return response.json()
+    else:
+        err = response.json().get("message", response.text)
+        raise Exception(f"Query failed: {err}")
+
+
+def persist_answer(answer, question, api_key):
+    # saves a wiki-worthy answer as a new concept page and integrates it
+    today     = datetime.now().strftime("%Y-%m-%d")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    slug      = re.sub(r'[^a-zA-Z0-9 ]', '', question)[:50].strip().replace(" ", "_")
+    filename  = f"Query_{slug}_{timestamp}"
+
+    note_content = f"""---
+title: "{question[:80]}"
+aliases: []
+tags:
+  - query/persisted
+doc_type: "Query"
+date_noted: "{today}"
+status: fresh
+---
+
+## Query
+
+{question}
+
+## Answer
+
+{answer}
+
+## References and Related
+
+### Vault Pages
+
+(backfilled automatically on ingest)
+"""
+
+    note_path = os.path.join(CONCEPTS_DIR, f"{filename}.md")
+    with open(note_path, "w", encoding="utf-8") as f:
+        f.write(note_content)
+    print(f"Saved: {filename}.md")
+
+    index_entry = f"| [[{filename}]] | Persisted query: {question[:60]} | General | {today} |"
+    append_to_index(index_entry, "General")
+    append_to_log("PERSIST", filename, [f"concepts/{filename}.md"])
+    print("Index and log updated.")
+
+
+def action_query(api_key):
+    print("\n--- QUERY WIKI ---")
+    print("Ask a question about your knowledge base.")
+    print("Type 'back' to return to the menu.\n")
+
+    question = ask_user("Your question")
+    if not question:
+        return
+
+    print("\nReading local vault context...")
+
+    try:
+        # first call with no page contents — server identifies what it needs
+        print("Sending query to server...")
+        result = send_query(api_key, question)
+
+        missing = result.get("missingPages", [])
+
+        # if server flagged missing pages, read them locally and retry
+        if missing:
+            print(f"\nServer needs {len(missing)} page(s): {missing}")
+            page_contents = {}
+            for page in missing:
+                name    = page.replace(".md", "")
+                content = read_local_page(name)
+                if content:
+                    page_contents[page] = content
+                    print(f"  Loaded: {page}")
+                else:
+                    print(f"  Not found locally: {page}")
+
+            if page_contents:
+                print("Retrying with page contents...")
+                result = send_query(api_key, question, page_contents)
+
+        answer = result.get("answer", "No answer returned.")
+
+        print("\n" + "="*60)
+        print("ANSWER")
+        print("="*60)
+        print(answer)
+        print("="*60 + "\n")
+
+        # log the query
+        append_to_log("QUERY", f'"{question[:60]}"', ["answered"])
+
+        # offer to persist if wiki-worthy
+        # check if the answer itself flagged wiki-worthy
+        if "wiki-worthy? yes" in answer.lower():
+            print("The answer was flagged as wiki-worthy.")
+            save = input("Save to wiki? (y/n): ").strip().lower()
+        else:
+            save = input("Save this answer to the wiki? (y/n): ").strip().lower()
+
+        if save == "y":
+            persist_answer(answer, question, api_key)
+            print("Answer saved to concepts/ and indexed.")
+
+    except requests.exceptions.ConnectionError:
+        print("Could not connect to server.")
+    except Exception as e:
+        print(f"Query failed: {e}")
+
+
 # POLLING & EXECUTION LOGIC
 def poll_for_result(job_id, api_key, original_filename):
     print(f"  Waiting for Cloud AI to process '{original_filename}'...")
@@ -558,28 +704,43 @@ class FileDropHandler(FileSystemEventHandler):
 
 
 def startWatching(api_key):
-    # Ensure wiki structure and special files exist before watching
     bootstrap_wiki()
 
-    event_handler = FileDropHandler(api_key)
-    observer      = Observer()
-    observer.schedule(event_handler, INPUT_FOLDER, recursive=True)
-    observer.start()
+    print("\n===============================")
+    print("  Vault is ready.")
+    print("===============================")
 
-    print("\n  Watcher Started")
-    print(f"  Monitoring '{INPUT_FOLDER}' for new files.")
-    print(f"  Supported types: PDF, DOCX, TXT, HTML, MD")
-    print("  Press CTRL+C to stop watching and return to menu.\n")
+    while True:
+        print("\nVAULT MENU")
+        print("1) Watch for new files")
+        print("2) Query the wiki")
+        print("3) Back to main menu")
 
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        observer.stop()
-        print("\n\nWatcher paused.")
+        choice = input("> ").strip()
 
-    observer.join()
-    return
+        if choice == "1":
+            event_handler = FileDropHandler(api_key)
+            observer      = Observer()
+            observer.schedule(event_handler, INPUT_FOLDER, recursive=True)
+            observer.start()
+
+            print(f"\n  Monitoring '{INPUT_FOLDER}' for new files.")
+            print(f"  Supported types: PDF, DOCX, TXT, HTML, MD")
+            print("  Press CTRL+C to stop watching and return to vault menu.\n")
+
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                observer.stop()
+                observer.join()
+                print("\n\nWatcher paused.")
+
+        elif choice == "2":
+            action_query(api_key)
+
+        elif choice == "3":
+            return
 
 
 # MENU ACTIONS 
