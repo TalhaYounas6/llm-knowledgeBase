@@ -8,8 +8,10 @@ export const ingestController = asyncHandler(async(req,res)=>{
         error.statusCode = 400
         throw error;
     }
-
-    const result = await ingestFileService(req.user.id,req.file);
+    
+    const {schemaText, indexText,logTail} = req.body;
+    
+    const result = await ingestFileService(req.user.id,req.file,schemaText,indexText,logTail);
 
     res.status(202).json(result);
 
@@ -47,9 +49,9 @@ export const getJobStatusController = asyncHandler(async(req,res)=>{
 
 export const completeJobController = asyncHandler(async(req,res)=>{
     const {jobId} = req.params;
-    const { markdown_result,status} = req.body;
+    const { plan,status} = req.body;
 
-    await completeJob(jobId,status,markdown_result);
+    await completeJob(jobId,status,plan);
 
     res.status(200).json({message:"Job updated successfully"});
 })

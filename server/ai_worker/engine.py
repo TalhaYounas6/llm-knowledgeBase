@@ -1,203 +1,612 @@
-from google.genai.types import HarmCategory, HarmBlockThreshold
+import time
+import mimetypes
+from google import genai
 import os
-from dotenv import load_dotenv
+import re
+from datetime import datetime
+from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
+from google.genai.types import HarmCategory, HarmBlockThreshold
+from google import genai as google_genai
 from markitdown import MarkItDown
-from datetime import datetime
-# load_dotenv(dotenv_path="../.env")
-
-# llm = ChatGoogleGenerativeAI(
-#     model="gemini-2.5-flash",
-#     temperature=0.2
-# )
-
-today = datetime.now().strftime("%Y-%m-%d")
 
 
-schema_prompt = ChatPromptTemplate.from_messages([
-    ("system", """
-    You are an expert Knowledge Manager and Archivist building a permanent, 
-highly interconnected Obsidian knowledge base (a "second brain").
+# Pydantic schemas
 
-Your task is to analyze the provided raw text, determine its nature 
-(e.g., Research Paper, Article, Book Excerpt, Tutorial, Meeting Notes, 
-Legal Document, Philosophy, Technical Documentation), and produce a 
-comprehensive, structured Obsidian markdown note.
+class DocumentClassification(BaseModel):
+    doc_type: str = Field(
+        description=(
+            "The document type. Must be one of: "
+            "Research | Article | Meeting | Journal | Tutorial | Legal | Reference | Book | Slides | Personal | Other"
+        )
+    )
+    suggested_sections: list[str] = Field(
+        description=(
+            "Ordered list of section headings appropriate for this document type. "
+            "Examples for Research: ['Executive Summary', 'Core Concepts and Entities', "
+            "'Deep Dive', 'Notable Specifics', 'Tensions and Limitations', "
+            "'Implications and Applications', 'Open Questions and Follow-Up']. "
+            "Adapt freely for other types. Do NOT include 'References and Related' — "
+            "that section is always added automatically."
+        )
+    )
 
-══════════════════════════════════════════
-CORE DIRECTIVE
-══════════════════════════════════════════
-This is NOT a summary task. Your output is a permanent knowledge artifact.
-Extract and elaborate on ALL meaningful concepts, arguments, data, and 
-insights. A reader who has never seen the source document should walk away 
-with deep, accurate, and actionable knowledge.
 
-Scale depth to the source:
-- A 2-page article → thorough single-page note
-- A 50-page research paper → exhaustive multi-section breakdown
-Never pad, never truncate, never invent.
+class ContentSection(BaseModel):
+    heading: str = Field(
+        description="Section heading text only — no numbering, no markdown formatting"
+    )
+    body: str = Field(
+        description=(
+            "Full markdown content for this section. "
+            "Use [[wikilinks]] for all concepts, entities, people, tools, and frameworks. "
+            "Use callout blocks: > [!NOTE], > [!IMPORTANT], > [!TIP], > [!QUOTE], > [!WARNING]. "
+            "Use ### subheadings freely for long content. "
+            "Use tables for comparative data. Use code blocks with language tags for code. "
+            "Do NOT include the section heading here — it is already in the heading field above. "
+            "Do NOT include YAML frontmatter here."
+        )
+    )
 
-══════════════════════════════════════════
-WIKILINK RULES (Critical for Obsidian Graph)
-══════════════════════════════════════════
-Wrap the following in [[wikilinks]] EVERY time they appear:
-  - Named concepts, theories, and frameworks       → [[Transformer Architecture]]
-  - Tools, technologies, and software              → [[PyTorch]], [[Obsidian]]
-  - People (full name on first mention)            → [[Geoffrey Hinton]]
-  - Organizations and institutions                 → [[OpenAI]], [[MIT]]
-  - Events                                         → [[2008 Financial Crisis]]
-  - Recurring themes across your knowledge base    → [[Emergence]], [[Entropy]]
 
-Do NOT wikilink: generic English words, pronouns, or anything that would 
-not be a meaningful standalone note topic.
-Use the pipe alias for readability where needed: [[Large Language Model|LLMs]]
+class WikiNote(BaseModel):
+    title: str = Field(
+        description="Descriptive title of the content — not the filename, but what the document is about"
+    )
+    aliases: list[str] = Field(
+        description="Alternative names or abbreviations someone might search for. 2-4 entries."
+    )
+    tags: list[str] = Field(
+        description=(
+            "Hierarchical tags in topic/subtopic format. "
+            "Examples: nlp/spelling-correction, ml/transformers, education/lecture. "
+            "3-6 tags."
+        )
+    )
+    author: str = Field(
+        description="Author(s) of the source document. Empty string if not found."
+    )
+    source: str = Field(
+        description="URL, DOI, filename, or publication name of the source"
+    )
+    date_published: str = Field(
+        description="Publication date extracted from document in YYYY-MM-DD format. Empty string if not found."
+    )
+    sections: list[ContentSection] = Field(
+        description=(
+            "All content sections for this note in order. "
+            "Use the suggested sections provided in the prompt. "
+            "Only include sections that have real content — never invent filler sections."
+        )
+    )
+    source_citations: list[str] = Field(
+        description=(
+            "References cited in the source document as plain text strings. "
+            "Format each as: Author(s), Year, Title, Journal or Publisher. "
+            "Only citations that actually appear in the source — do not add external sources. "
+            "Empty list if document has no citations (journal entries, meeting notes, etc.)."
+        )
+    )
+    see_also: list[str] = Field(
+        description=(
+            "Related concepts, frameworks, tools, and entities worth having their own vault page. "
+            "Format each as a [[wikilink]]. "
+            "Do NOT list citations here — only concepts and named entities."
+        )
+    )
 
-══════════════════════════════════════════
-YAML FRONTMATTER RULES
-══════════════════════════════════════════
-Always open with this YAML block. Fill every field:
 
----
-title: "[Descriptive title of the content, not the filename]"
-aliases:
-  - "[Alternative name or abbreviation someone might search for]"
-tags:
-  - [Use hierarchical tags: topic/subtopic e.g. ml/transformers, economics/macro]
-  - [Add a source-type tag: source/paper, source/article, source/book, source/tutorial]
-doc_type: [Research Paper | Article | Book Excerpt | Tutorial | Meeting | Legal | Other]
-author: "[Extracted from document, or 'Unknown']"
-source: "[URL, DOI, or publication name if present, else 'N/A']"
-date_published: "[Extract from document if present, else 'Unknown']"
-date_noted: "{{DATE}}"
-status: "fresh"
----
+class WikiMetadata(BaseModel):
+    index_entry: str = Field(
+        description=(
+            "A single pipe-delimited markdown table row in EXACTLY this format: "
+            "| [[NoteFilename]] | One sentence summary of the note | Category | YYYY-MM-DD | "
+            "The category MUST be one of the exact strings from the SCHEMA Index Categories list. "
+            "Do not invent new categories. Do not change the column order. "
+            "Example: | [[Real_Word_Spelling_Errors]] | Surveys detection methods for real-word spelling errors in Urdu NLP | NLP & Linguistics | 2026-05-16 |"
+        )
+    )
+    index_category: str = Field(
+        description=(
+            "The exact category string this note belongs to. "
+            "Must be one of: 'NLP & Linguistics', 'Machine Learning', "
+            "'Systems & Architecture', 'Personal Knowledge Management', "
+            "'Meetings & Notes', 'Journal & Reflections', 'General'. "
+            "Copy the string exactly — no variations, no new categories."
+        )
+    )
+    cross_links: list[str] = Field(
+        description=(
+            "List of exact filenames without .md extension of existing pages "
+            "from the CURRENT INDEX that this new note meaningfully relates to. "
+            "To find valid filenames look for [[Filename]] patterns in the index. "
+            "Extract only the text between [[ and ]]. "
+            "Only include pages where the conceptual overlap is substantial — "
+            "shared methodology, shared topic, shared domain, or directly cited work. "
+            "Max 5. Empty list only if the index is empty or no genuine overlap exists."
+        )
+    )
 
-══════════════════════════════════════════
-OBSIDIAN FORMATTING RULES
-══════════════════════════════════════════
-- Use callout blocks for high-signal content:
-    > [!NOTE] for important clarifications
-    > [!IMPORTANT] for critical conclusions or warnings  
-    > [!TIP] for actionable advice or best practices
-    > [!QUOTE] for direct quotations worth preserving
-    > [!WARNING] for caveats, limitations, or counterarguments
 
-- Use ### subheadings freely inside sections for long content
-- Use tables to organize comparative data or multi-attribute entities
-- Use code blocks with language tags for all code: ```python, ```bash etc.
-- Bold (**term**) key terms on their first definition
-- Never use bold for emphasis in running prose — reserve it for terms
+# Extraction — MarkItDown for classification preview, Gemini File API for full note
 
-══════════════════════════════════════════
-REQUIRED STRUCTURE
-══════════════════════════════════════════
-
-# [Highly descriptive title — not the document's own title, but what it IS about]
-
-## 1. Executive Summary
-[3–4 sentences maximum. Answer in order:
-  (1) What is this document?
-  (2) Why was it written / what problem does it address?
-  (3) What is its primary conclusion or value?
-  (4) Who should care about it?]
-
-## 2. Core Concepts & Entities
-[Every major concept, entity, person, tool, or framework introduced.
-Format as a definition list:
-  **[[Concept Name]]** — Clear, precise explanation in your own words. 
-  Include how this concept functions within the document's argument.
-  Omit nothing that appears more than once in the source.]
-
-## 3. Deep Dive: Arguments, Methodology & Narrative
-[The core of the note. This section must mirror the source document's 
-own logical structure — if the paper has 5 sections, use 5 subheadings.
-If it's a narrative article, follow the narrative arc.
-  - Reconstruct every major argument with its supporting evidence
-  - For methodologies: include steps, parameters, design choices, and rationale
-  - For narratives: preserve cause-and-effect chains, not just events
-  - Use ### subheadings for each major segment
-  - All key terms wrapped in [[wikilinks]]]
-
-## 4. Notable Specifics
-[Extract high-value atomic information. Use subsections as applicable:]
-
-### Data & Metrics
-[Tables, statistics, benchmarks, experimental results. Reproduce numbers exactly.]
-
-### Direct Quotes
-[Use > [!QUOTE] callouts for quotes that capture something irreplaceable.
-Only include quotes where the exact wording matters — otherwise paraphrase in §3.]
-
-### Code, Commands & Formulas
-[All code blocks, terminal commands, mathematical expressions, or algorithms.]
-
-## 5. Tensions, Limitations & Counterarguments
-[What does the document itself acknowledge as weaknesses, caveats, or 
-open problems? What does it NOT address that it arguably should?
-This is not your critique — extract the document's own epistemic humility.
-If none is stated, note that explicitly.]
-
-## 6. Implications & Applications (The "So What?")
-[Why does this document matter beyond itself?
-  - Practical: how can this be applied or acted on?
-  - Intellectual: what does this change or challenge in the field?
-  - Personal/Organizational: who benefits from knowing this and how?]
-
-## 7. Open Questions & Follow-Up
-[What questions does this document raise but not answer?
-What would a curious reader investigate next?
-Format as a bullet list — these become seeds for future notes in the graph.]
-
-## 8. References & Related Concepts
-[List all citations, links, or external works mentioned in the source.
-Then add a "See Also" subsection with [[wikilinks]] to related concepts 
-you can infer belong in the same knowledge cluster — even if not cited.]
-
-### See Also
-- [[Related Concept 1]]
-- [[Related Concept 2]]
-
-    """),
-    ("human", "Here is the raw text to process:\n\n{raw_text}")
-])
-
-# chain = schema_prompt | llm
-
-def extract_text_from_file(file_path):
-    print(f"Extracting text from {os.path.basename(file_path)}...")
+def extract_preview(file_path: str) -> str:
+    
     md = MarkItDown()
     try:
         result = md.convert(file_path)
-        return result.text_content
+        return result.text_content[:3000]
     except Exception as e:
-        print(f"Error reading file {file_path}: {e}")
-        return None
+        print(f"  Preview extraction failed: {e}")
+        return ""
 
-def processDocument(file_path, userKey):
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        google_api_key=userKey,
-        temperature=0.2,
-        max_output_tokens=65536,
-        safety_settings={
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-        }
+
+# 1. Keep your robust fallback map handy
+GEMINI_MIME_MAP = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg"
+}
+
+def get_mime_type(file_path: str) -> str:
+    """Dynamically determines the MIME type based on the file extension."""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in GEMINI_MIME_MAP:
+        return GEMINI_MIME_MAP[ext]
+    
+    mime_type, _ = mimetypes.guess_type(file_path)
+    return mime_type or "application/octet-stream"
+
+
+def upload_to_gemini(file_path: str, user_key: str, original_filename: str):
+    client = genai.Client(api_key=user_key)
+    
+    
+    detected_mime = get_mime_type(original_filename)
+    
+    print(f"  Uploading to Gemini File API: {os.path.basename(file_path)} (Detected as {detected_mime})...")
+    
+    
+    uploaded = client.files.upload(
+        file=file_path,
+        config={"mime_type": detected_mime}
     )
 
+    while uploaded.state.name == "PROCESSING":
+        print(f"  File processing... waiting")
+        time.sleep(2)
+        uploaded = client.files.get(name=uploaded.name)
+    
+    if uploaded.state.name == "FAILED":
+        raise Exception(f"Gemini file upload failed: {uploaded.name}")
+    
+    print(f"  Upload complete. Name: {uploaded.name}")
+    return uploaded
+
+
+def delete_gemini_file(file_name: str, user_key: str):
+    # Clean up uploaded file from Gemini File API after processing
+    try:
+        client = google_genai.Client(api_key=user_key)
+        client.files.delete(name=file_name)
+        print(f"  Gemini file deleted: {file_name}")
+    except Exception as e:
+        print(f"  Could not delete Gemini file {file_name}: {e}")
+
+
+# Markdown assembler with Python, no LLM involvement
+
+def assemble_markdown(note: WikiNote, doc_type: str, today: str) -> str:
+    def quote(s: str) -> str:
+        return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+    lines = []
+
+    lines.append("---")
+    lines.append(f"title: {quote(note.title)}")
+    lines.append("aliases:")
+    for alias in note.aliases:
+        lines.append(f"  - {quote(alias)}")
+    lines.append("tags:")
+    for tag in note.tags:
+        lines.append(f"  - {tag}")
+    lines.append(f"doc_type: {doc_type}")
+    lines.append(f"author: {quote(note.author)}")
+    lines.append(f"source: {quote(note.source)}")
+    lines.append(f"date_published: {quote(note.date_published)}")
+    lines.append(f'date_noted: "{today}"')
+    lines.append("status: fresh")
+    lines.append("---")
+    lines.append("")
+
+    for i, section in enumerate(note.sections, 1):
+        lines.append(f"## {i}. {section.heading}")
+        lines.append("")
+        body = re.sub(r'\n{3,}', '\n\n', section.body.strip())
+        lines.append(body)
+        lines.append("")
+
+    next_num = len(note.sections) + 1
+    lines.append(f"## {next_num}. References and Related")
+    lines.append("")
+
+    if note.source_citations:
+        lines.append("### Source Citations")
+        lines.append("")
+        for i, citation in enumerate(note.source_citations, 1):
+            lines.append(f"{i}. {citation}")
+        lines.append("")
+
+    if note.see_also:
+        lines.append("### See Also")
+        lines.append("")
+        for item in note.see_also:
+            item = item.strip()
+            if not item.startswith("[["):
+                item = f"[[{item}]]"
+            lines.append(f"- {item}")
+        lines.append("")
+
+    lines.append("### Vault Pages")
+    lines.append("")
+    lines.append("(backfilled automatically on ingest)")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+# Prompts
+
+def build_classification_prompt() -> str:
+    return (
+        "You are a document classifier. Read the source document and determine "
+        "its type and the best section structure for a knowledge base note.\n\n"
+
+        "Document types: Research | Article | Meeting | Journal | Tutorial | "
+        "Legal | Reference | Book | Slides | Other\n\n"
+
+        "You MUST return both fields:\n"
+        "1. doc_type — the document type from the list above\n"
+        "2. suggested_sections — a complete ordered list of 5-8 section headings "
+        "appropriate for this specific document. This field is required and must "
+        "never be empty.\n\n"
+
+        "Be specific with sections — a Machine Learning lecture should have sections "
+        "like 'Course Overview', 'Key Algorithms', 'Mathematical Foundations', "
+        "not generic research paper sections.\n\n"
+
+        "SOURCE DOCUMENT (first 3000 chars for classification):\n{raw_text_preview}"
+    )
+
+
+def build_note_generation_prompt() -> str:
+    return (
+        "You are a Wiki Engineer building a permanent, highly interconnected "
+        "Obsidian knowledge base.\n\n"
+
+        "Read the SCHEMA below — it defines the wiki's architecture and rules.\n\n"
+
+        "═══════════════════════════════════════\n"
+        "SCHEMA:\n"
+        "═══════════════════════════════════════\n"
+        "{schema}\n\n"
+
+        "═══════════════════════════════════════\n"
+        "YOUR TASK\n"
+        "═══════════════════════════════════════\n"
+        "Extract the content of the source document into a structured WikiNote object.\n\n"
+
+        "This is NOT a summary. Extract every distinct concept, finding, argument, "
+        "and piece of data the source contains. Cover each thing once, thoroughly. "
+        "Do not repeat information across sections. Do not elaborate beyond what "
+        "the source directly supports.\n\n"
+
+        "You will populate these sections in order: {suggested_sections}\n\n"
+
+        "For each section body:\n"
+        "  - Write full markdown content — do NOT include the heading (it is separate)\n"
+        "  - Use [[wikilinks]] for ALL concepts, entities, people, tools, frameworks\n"
+        "  - Use callout blocks: > [!NOTE], > [!IMPORTANT], > [!TIP], > [!QUOTE], > [!WARNING]\n"
+        "  - Use ### subheadings freely for long content\n"
+        "  - Use tables for comparative or multi-attribute data\n"
+        "  - Use code blocks with language tags for any code or commands\n"
+        "  - Bold (**term**) key terms on first definition only\n\n"
+
+        "CHARACTER BUDGET — use this to calibrate your output length:\n"
+        "  Total note target:    {total_char_budget} characters\n"
+        "  A character is one letter, space, or punctuation mark — count as you write.\n"
+        "  When a section body reaches its target, wrap up that section and move to the next.\n"
+        "  Cover everything once. Stop when every section is complete.\n\n"
+
+        "For source_citations: only citations from the document's own bibliography. "
+        "Plain text, no wikilinks, no filenames.\n\n"
+
+        "For see_also: related concepts and entities as [[wikilinks]], not citations.\n\n"
+
+        "The source document is attached — read it directly."
+    )
+
+
+def build_meta_system_prompt() -> str:
+    return (
+        "You are a Wiki Metadata Specialist. You will be given a completed Obsidian wiki note "
+        "and must produce three pieces of metadata for it: an index entry, a category, "
+        "and a list of cross-links to existing pages.\n\n"
+
+        "═══════════════════════════════════════\n"
+        "CURRENT INDEX (find cross-link targets here):\n"
+        "═══════════════════════════════════════\n"
+        "{index}\n\n"
+
+        "═══════════════════════════════════════\n"
+        "RECENT LOG (understand what has been ingested recently):\n"
+        "═══════════════════════════════════════\n"
+        "{log_tail}\n\n"
+
+        "═══════════════════════════════════════\n"
+        "VALID CATEGORIES — must match SCHEMA exactly, copy character for character:\n"
+        "═══════════════════════════════════════\n"
+        "- NLP & Linguistics\n"
+        "- Machine Learning\n"
+        "- Systems & Architecture\n"
+        "- Personal Knowledge Management\n"
+        "- Meetings & Notes\n"
+        "- Journal & Reflections\n"
+        "- General\n\n"
+
+        "If the note does not clearly fit any specific category use General. "
+        "Never invent a new category — only use the ones listed above.\n\n"
+
+        "═══════════════════════════════════════\n"
+        "RULES:\n"
+        "═══════════════════════════════════════\n"
+        "INDEX ENTRY:\n"
+        "  - Format exactly: | [[NoteFilename]] | One sentence summary | Category | YYYY-MM-DD |\n"
+        "  - Use the wiki page filename provided in the user message for [[NoteFilename]]\n"
+        "  - Date is today: {today}\n"
+        "  - Category must be one of the valid categories above, copied exactly\n"
+        "  - Summary must be one sentence — no more, no less\n\n"
+
+        "CROSS LINKS:\n"
+        "  - Only use filenames that appear as [[Filename]] in the CURRENT INDEX\n"
+        "  - Extract the exact text between [[ and ]] — no .md extension\n"
+        "  - Only link pages with substantial conceptual overlap: shared methodology, "
+        "    shared topic, shared domain, or directly cited work\n"
+        "  - Maximum 5. Empty list only if the index is genuinely empty\n"
+    )
+
+
+# Main function
+
+def generate_integration_plan(
+    file_path: str,
+    user_key: str,
+    original_filename: str,
+    schema_text: str,
+    index_text: str,
+    log_tail: str = ""
+):
+    # Call 1 — fast classification using MarkItDown text preview (no ML models)
+    # Call 2 — structured note generation using Gemini File API natively
+    # Call 3 — metadata: index entry, category, cross-links
+    # Python assembler converts WikiNote to perfect Obsidian markdown
+
+    # Quick text preview for classification 
+    ext = os.path.splitext(original_filename)[1]
+    if not file_path.lower().endswith(ext.lower()):
+        new_file_path = file_path + ext
+        os.rename(file_path, new_file_path)
+        file_path = new_file_path
+    text_preview = extract_preview(file_path)
+
+    # Upload file to Gemini for native reading in Call 2
+    gemini_file = upload_to_gemini(file_path, user_key,original_filename)
+
+    # Char budget based on file size estimate from preview
+    # Use preview length scaled up as a rough input size proxy
+    # For classification we only need the budget after we know section count
+    # so we compute a base budget here and refine after classification
+    preview_scale   = max(1, len(text_preview))
+    # MarkItDown preview is first 3000 chars of full extraction
+    # estimate full doc chars as preview_scale * ratio, floor at 5000
+    file_size_bytes   = os.path.getsize(file_path)
+    estimated_input   = file_size_bytes // 3
+    total_char_budget = max(8000, min(60000, int(estimated_input * 0.45)))
+
+    print(f"  Total char budget:       {total_char_budget:,}")
+
+    # Safe filename derivation
+    note_filename = os.path.splitext(original_filename)[0]
+    note_filename = re.sub(r'\s*-\s*Copy$', '', note_filename, flags=re.IGNORECASE)
+    note_filename = note_filename.replace(" ", "_")
+
     today = datetime.now().strftime("%Y-%m-%d")
-    formatted_prompt = schema_prompt.partial(DATE=today)
 
-    text_document = extract_text_from_file(file_path)
-    if not text_document:
-        raise Exception("Could not extract text from document.")
+    safety = {
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH:        HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_HARASSMENT:         HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT:  HarmBlockThreshold.BLOCK_NONE,
+    }
 
+    # Call 1 — classification (text-based, fast, cheap)
+    classify_llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        google_api_key=user_key,
+        temperature=0.1,
+        max_output_tokens=1024,
+        safety_settings=safety
+    )
+    structured_classify_llm = classify_llm.with_structured_output(DocumentClassification)
+    classify_prompt = ChatPromptTemplate.from_messages([
+        ("user", build_classification_prompt()),  # changed system to user
+    ])
+    classify_chain = classify_prompt | structured_classify_llm
 
-    chain = formatted_prompt | llm
-    response = chain.invoke({"raw_text": text_document})
-   
-    return response.content
+    print(f"  Brain [1/3]: Classifying '{original_filename}'...")
+    classification = classify_chain.invoke({
+        "raw_text_preview": text_preview
+    })
+
+    doc_type           = classification.doc_type
+    suggested_sections = ", ".join(classification.suggested_sections)
+    num_sections       = len(classification.suggested_sections)
+
+    # Refine char budget now that we know section count
+    per_section_budget = max(500, total_char_budget // max(1, num_sections))
+    # citations_budget   = max(500, int(total_char_budget * 0.15))
+
+    print(f"  Detected type:     {doc_type}")
+    print(f"  Sections:          {suggested_sections}")
+    print(f"  Per-section budget: {per_section_budget:,} chars")
+
+    # Call 2 — note generation using Gemini File API natively
+    # The model reads the uploaded file directly — no text extraction needed
+    # We use the google-genai client directly here because LangChain does not
+    # cleanly support passing a File API reference with structured output
+    client = google_genai.Client(api_key=user_key)
+
+    system_prompt = build_note_generation_prompt().format(
+        schema=schema_text,
+        suggested_sections=suggested_sections,
+        total_char_budget=f"{total_char_budget:,}",
+    )
+
+    user_message = (
+        f"Original filename: {original_filename}\n"
+        f"Wiki page filename: {note_filename}\n"
+        f"Per-section character target: {per_section_budget:,} characters per section body.\n"
+        f"Major sections may use up to 1.5x this. Minor sections 0.5x this."
+    )
+
+    print(f"  Brain [2/3]: Generating structured note for '{original_filename}'...")
+
+    wiki_note  = None
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            from google.genai import types as genai_types
+
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    genai_types.Content(
+                        role="user",
+                        parts=[
+                            genai_types.Part.from_uri(
+                                file_uri=gemini_file.uri,
+                                mime_type=gemini_file.mime_type
+                            ),
+                            genai_types.Part.from_text(text=user_message),
+                        ]
+                    )
+                ],
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    response_schema=WikiNote,
+                    max_output_tokens=65536,
+                    temperature=0.2,
+                    safety_settings=[
+                        genai_types.SafetySetting(
+                            category="HARM_CATEGORY_DANGEROUS_CONTENT",
+                            threshold="BLOCK_NONE"
+                        ),
+                        genai_types.SafetySetting(
+                            category="HARM_CATEGORY_HATE_SPEECH",
+                            threshold="BLOCK_NONE"
+                        ),
+                        genai_types.SafetySetting(
+                            category="HARM_CATEGORY_HARASSMENT",
+                            threshold="BLOCK_NONE"
+                        ),
+                        genai_types.SafetySetting(
+                            category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                            threshold="BLOCK_NONE"
+                        ),
+                    ]
+                )
+            )
+
+            # Parse the structured response into WikiNote
+            import json
+            raw_json = response.text
+            wiki_note = WikiNote.model_validate(json.loads(raw_json))
+            break
+
+        except Exception as e:
+            last_error = e
+            print(f"  Attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                print(f"  Retrying...")
+
+    # Clean up uploaded file from Gemini regardless of success or failure
+    delete_gemini_file(gemini_file.name, user_key)
+
+    if wiki_note is None:
+        raise Exception(f"Note generation failed after 3 attempts. Last error: {last_error}")
+
+    print(f"  Sections generated: {[s.heading for s in wiki_note.sections]}")
+    print(f"  Citations found:    {len(wiki_note.source_citations)}")
+    print(f"  See Also entries:   {len(wiki_note.see_also)}")
+
+    # Python assembler 
+    note_content = assemble_markdown(wiki_note, doc_type, today)
+    actual_chars = len(note_content)
+
+    print(f"  Note chars:        {actual_chars:,}")
+    print(f"  Ratio:             {actual_chars / max(1, estimated_input):.2f}x estimated input")
+
+    if actual_chars > estimated_input * 2:
+        print(f"  WARNING: Note may be verbose relative to input size.")
+
+    # Call 3 — metadata
+    meta_llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        google_api_key=user_key,
+        temperature=0.1,
+        max_output_tokens=4096,
+        safety_settings=safety
+    )
+    structured_meta_llm = meta_llm.with_structured_output(WikiMetadata)
+
+    meta_prompt = ChatPromptTemplate.from_messages([
+        ("system", build_meta_system_prompt()),
+        ("user", (
+            "Wiki page filename: {note_filename}\n\n"
+            "COMPLETED NOTE:\n{note_content}"
+        ))
+    ])
+
+    meta_chain = meta_prompt | structured_meta_llm
+    print(f"  Brain [3/3]: Generating metadata for '{original_filename}'...")
+
+    meta_result = meta_chain.invoke({
+        "index":         index_text,
+        "log_tail":      log_tail if log_tail else "No log entries yet.",
+        "today":         today,
+        "note_filename": note_filename,
+        "note_content":  note_content
+    })
+
+    print(f"  Cross-links identified: {meta_result.cross_links}")
+    print(f"  Index category:         {meta_result.index_category}")
+
+    return {
+        "note_filename":  note_filename,
+        "note_content":   note_content,
+        "index_entry":    meta_result.index_entry,
+        "cross_links":    meta_result.cross_links,
+        "index_category": meta_result.index_category
+    }

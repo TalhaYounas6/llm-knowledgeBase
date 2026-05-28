@@ -7,7 +7,7 @@ import { decrypt } from '../../utils/crypto.js';
 
 
 
-export const ingestFileService = async (userId, file) => {
+export const ingestFileService = async (userId, file,schemaText,indexText,logTail) => {
     // 1. Increment user's usage quota in DB
     const user = await User.findByPk(userId);
 
@@ -23,17 +23,22 @@ export const ingestFileService = async (userId, file) => {
         original_filename : file.originalname,
         status : "pending"
     })
+    
     // 3. Talk to RabbitMQ (Send ticket with file.path and job.id)
-
-    const queue = await getQueueChannel();
+     const queue = await getQueueChannel();
 
     const jobTicket = {
         userId : user.id,
         jobId: newJob.id,
         filePath: file.path,
         original_filename: file.originalname,
-        userApiKey: decrypt(user.encrypted_custom_key)
+        userApiKey: decrypt(user.encrypted_custom_key),
+        schemaText : schemaText,
+        indexText : indexText,
+        logTail : logTail
     }
+
+    
 
     queue.sendToQueue('pdf_jobs',Buffer.from(JSON.stringify(jobTicket)),{ persistent: true});
     // 4. Return job details so the Controller can send a 202 response
@@ -107,7 +112,7 @@ export const jobStatus = async(jobId,userId)=>{
 }
 
 
-export const completeJob = async(id,status,markdown_result)=>{
+export const completeJob = async(id,status,plan)=>{
 
     const job = await IngestJob.findOne({where:{id:id}});
 
@@ -116,7 +121,7 @@ export const completeJob = async(id,status,markdown_result)=>{
     }
 
     job.status= status;
-    job.markdown_result = markdown_result;
+    job.markdown_result = plan;
 
     await job.save();
     
