@@ -18,7 +18,7 @@ class DocumentClassification(BaseModel):
     doc_type: str = Field(
         description=(
             "The document type. Must be one of: "
-            "Research | Article | Meeting | Journal | Tutorial | Legal | Reference | Book | Slides | Personal | Other"
+            "Research | Article | Meeting | Journal | Tutorial | Legal | Book  | Personal | Educational | Other"
         )
     )
     suggested_sections: list[str] = Field(
@@ -462,7 +462,7 @@ def generate_integration_plan(
     suggested_sections = ", ".join(classification.suggested_sections)
     num_sections       = len(classification.suggested_sections)
 
-    # Refine char budget now that we know section count
+    # Refine char budget
     per_section_budget = max(500, total_char_budget // max(1, num_sections))
     # citations_budget   = max(500, int(total_char_budget * 0.15))
 
@@ -472,7 +472,7 @@ def generate_integration_plan(
 
     # Call 2 — note generation using Gemini File API natively
     # The model reads the uploaded file directly — no text extraction needed
-    # We use the google-genai client directly here because LangChain does not
+    # using google-genai client directly here because LangChain does not
     # cleanly support passing a File API reference with structured output
     client = google_genai.Client(api_key=user_key)
 
