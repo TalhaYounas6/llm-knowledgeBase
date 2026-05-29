@@ -55,7 +55,7 @@ module.exports = (sequelize, DataTypes) => {
         },
         daily_limit: {
             type: DataTypes.INTEGER,
-            defaultValue: 5 
+            defaultValue: 30 
         },
       encrypted_custom_key: {
         type: Sequelize.TEXT,

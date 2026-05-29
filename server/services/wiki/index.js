@@ -89,6 +89,16 @@ QUERY TYPES — detect and handle accordingly:
 - LINT/HEALTH  → scan for orphans, contradictions, gaps, stale claims.
                  Report as structured list grouped by issue type.
 
+
+"IF PAGES ARE MISSING:\n"
+"If a page you need is not in PAGE CONTENTS below, do NOT attempt to answer.\n"
+"Output ONLY this exact line and nothing else:\n"
+"MISSING_PAGES: filename1.md, filename2.md\n"
+"Use the exact filenames as they appear in [[wikilinks]] in the index.\n"
+"Do not write any explanation. Do not attempt a partial answer.\n"
+"Just the MISSING_PAGES line and stop.\n\n"
+
+
 STRICT RULES:
 1. Only use information from the wiki. Never use outside knowledge.
 2. Always cite the specific wiki page your answer comes from.
@@ -141,22 +151,35 @@ ${question}
         // Detect missing pages the LLM flagged
         // If the model says it needs a page not in pageContents,
         // extract those page names and return them so client can fetch and retry
-        const missingPagePattern = /I need to read ([^\s,\.]+\.md)/gi;
-        const missingPages       = [];
-        let match;
-        while ((match = missingPagePattern.exec(text)) !== null) {
-            missingPages.push(match[1]);
+       const answer = text.trim();
+
+        // check if the entire response is a MISSING_PAGES signal
+        if (answer.startsWith("MISSING_PAGES:")) {
+            const pageList = answer.replace("MISSING_PAGES:", "").trim();
+            const missingPages = pageList
+                .split(",")
+                .map(p => p.trim())
+                .filter(Boolean);
+
+            user.requests_today += 1;
+            await user.save();
+
+            return {
+                answer:       null,
+                status:       "missing_pages",
+                missingPages: missingPages
+            };
         }
 
+        // normal answer — no missing pages
         user.requests_today += 1;
         await user.save();
 
         return {
-            answer:       text,
+            answer:       answer,
             status:       "success",
-            missingPages: missingPages  // client reads these and sends a follow-up if non-empty
+            missingPages: []
         };
-
     } catch (error) {
         console.error("Query Error:", error);
         throw new Error("AI failed to process your question.");

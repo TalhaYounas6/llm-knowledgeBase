@@ -467,11 +467,26 @@ def send_query(api_key, question, page_contents=None):
 
 
 def persist_answer(answer, question, api_key):
-    # saves a wiki-worthy answer as a new concept page and integrates it
     today     = datetime.now().strftime("%Y-%m-%d")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     slug      = re.sub(r'[^a-zA-Z0-9 ]', '', question)[:50].strip().replace(" ", "_")
     filename  = f"Query_{slug}_{timestamp}"
+
+    # extract wikilinks from the answer — these are the pages the model cited
+    cited_pages = re.findall(r'\[\[([^\]]+)\]\]', answer)
+    # deduplicate while preserving order
+    seen = set()
+    unique_cited = []
+    for p in cited_pages:
+        if p not in seen:
+            seen.add(p)
+            unique_cited.append(p)
+
+    # build vault pages section from cited wikilinks
+    if unique_cited:
+        vault_pages_lines = "\n".join(f"- [[{p}]]" for p in unique_cited)
+    else:
+        vault_pages_lines = "(backfilled automatically on ingest)"
 
     note_content = f"""---
 title: "{question[:80]}"
@@ -495,7 +510,7 @@ status: fresh
 
 ### Vault Pages
 
-(backfilled automatically on ingest)
+{vault_pages_lines}
 """
 
     note_path = os.path.join(CONCEPTS_DIR, f"{filename}.md")
@@ -503,11 +518,21 @@ status: fresh
         f.write(note_content)
     print(f"Saved: {filename}.md")
 
+    # backfill bidirectionally — the cited pages should link back to this concept
+    affected = [f"concepts/{filename}.md"]
+    for cited in unique_cited:
+        target_path = find_local_page(cited)
+        if target_path:
+            backfill_local_crosslink(target_path, filename)
+            affected.append(cited)
+            print(f"  Backfilled link into: {cited}.md")
+        else:
+            print(f"  Cited page not found on disk: {cited}")
+
     index_entry = f"| [[{filename}]] | Persisted query: {question[:60]} | General | {today} |"
     append_to_index(index_entry, "General")
-    append_to_log("PERSIST", filename, [f"concepts/{filename}.md"])
+    append_to_log("PERSIST", filename, affected)
     print("Index and log updated.")
-
 
 def action_query(api_key):
     print("\n--- QUERY WIKI ---")
@@ -518,21 +543,21 @@ def action_query(api_key):
     if not question:
         return
 
-    print("\nReading local vault context...")
+    print("Reading local vault context...")
 
     try:
-        # first call with no page contents — server identifies what it needs
+        # first call — no page contents, let the model identify what it needs
         print("Sending query to server...")
         result = send_query(api_key, question)
 
-        missing = result.get("missingPages", [])
+        if result.get("status") == "missing_pages":
+            missing = result.get("missingPages", [])
+            print(f"\n  Model needs {len(missing)} page(s): {missing}")
 
-        # if server flagged missing pages, read them locally and retry
-        if missing:
-            print(f"\nServer needs {len(missing)} page(s): {missing}")
             page_contents = {}
             for page in missing:
-                name    = page.replace(".md", "")
+                # strip .md and any path prefix the model may have included
+                name = os.path.basename(page).replace(".md", "")
                 content = read_local_page(name)
                 if content:
                     page_contents[page] = content
@@ -540,11 +565,17 @@ def action_query(api_key):
                 else:
                     print(f"  Not found locally: {page}")
 
-            if page_contents:
-                print("Retrying with page contents...")
-                result = send_query(api_key, question, page_contents)
+            if not page_contents:
+                print("  None of the requested pages were found locally.")
+                return
 
-        answer = result.get("answer", "No answer returned.")
+            print("  Retrying with page contents...")
+            result = send_query(api_key, question, page_contents)
+
+        answer = result.get("answer")
+        if not answer:
+            print("No answer returned.")
+            return
 
         print("\n" + "="*60)
         print("ANSWER")
@@ -552,11 +583,8 @@ def action_query(api_key):
         print(answer)
         print("="*60 + "\n")
 
-        # log the query
         append_to_log("QUERY", f'"{question[:60]}"', ["answered"])
 
-        # offer to persist if wiki-worthy
-        # check if the answer itself flagged wiki-worthy
         if "wiki-worthy? yes" in answer.lower():
             print("The answer was flagged as wiki-worthy.")
             save = input("Save to wiki? (y/n): ").strip().lower()
@@ -571,7 +599,6 @@ def action_query(api_key):
         print("Could not connect to server.")
     except Exception as e:
         print(f"Query failed: {e}")
-
 
 # POLLING & EXECUTION LOGIC
 def poll_for_result(job_id, api_key, original_filename):
