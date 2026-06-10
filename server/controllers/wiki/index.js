@@ -1,5 +1,6 @@
 import asyncHandler from "express-async-handler";
-import { completeJob, ingestFileService,jobStatus,queryWikiService } from "../../services/wiki/index.js";
+import { completeJob, deleteJob, ingestFileService,jobStatus,queryWikiService } from "../../services/wiki/index.js";
+import { error } from "console";
 
 export const ingestController = asyncHandler(async(req,res)=>{
     
@@ -53,15 +54,24 @@ export const getJobStatusController = asyncHandler(async(req,res)=>{
         id: job.id,
         status: job.status, 
         filename: job.original_filename,
-        markdown_content: job.status === 'completed' ? job.markdown_result : null
+        markdown_content: job.status === 'completed' ? job.markdown_result : null,
+        error_message: job.error_message ?? null
     })
 })
 
 export const completeJobController = asyncHandler(async(req,res)=>{
     const {jobId} = req.params;
-    const { plan,status} = req.body;
+    const { plan,status,error} = req.body;
 
-    await completeJob(jobId,status,plan);
+    await completeJob(jobId,status,plan,error);
 
     res.status(200).json({message:"Job updated successfully"});
+})
+
+export const deleteJobController = asyncHandler(async(req,res)=>{
+    const {job_id} = req.params;
+    
+    await deleteJob(job_id,req.user.id);
+
+    res.status(200).json({message:"Job deleted successfully after completion"});
 })

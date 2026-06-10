@@ -605,67 +605,79 @@ def poll_for_result(job_id, api_key, original_filename):
     print(f"  Waiting for Cloud AI to process '{original_filename}'...")
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    while True:
+    
+    try:
+        while True:
+            try:
+                res = requests.get(f"{SERVER_URL}/wiki/job/{job_id}", headers=headers)
+
+                if res.status_code == 200:
+                    job_data = res.json()
+                    status   = job_data.get("status")
+                    error_msg = job_data.get("error_message")
+
+                    if status == "completed":
+                        print("\n  AI finished. Executing integration plan locally...")
+                        plan = job_data.get("markdown_content", {}) # Changed plan to markdown_content
+
+                        note_filename = plan.get(
+                            "note_filename",
+                            os.path.splitext(original_filename)[0].replace(" ", "_")
+                        )
+
+                        # Step 1: Save the new note 
+                        note_path = os.path.join(NOTES_DIR, f"{note_filename}.md")
+                        with open(note_path, "w", encoding="utf-8") as f:
+                            f.write(plan.get("note_content", ""))
+                        print(f"Saved note: {note_filename}.md")
+
+                        # Step 2: Append to index (never rewrite)
+                        index_entry    = plan.get("index_entry", "")
+                        index_category = plan.get("index_category", "General")
+                        if index_entry:
+                            append_to_index(index_entry, index_category)
+                        print("Index updated")
+
+                        # Step 3: Backfill cross-links (bidirectional) 
+                        affected = [note_filename]
+                        for target in plan.get("cross_links", []):
+                            target_path = find_local_page(target)
+                            if target_path:
+                                backfill_local_crosslink(target_path, note_filename)
+                                affected.append(target)
+                                print(f"Backfilled link into: {target}.md")
+                            else:
+                                print(f"Cross-link target not found on disk: {target}")
+
+                        # Step 4: Append to log 
+                        append_to_log("INGEST", note_filename, affected)
+                        print("Log updated")
+
+                        print(f"\n  Integration complete. Vault is up to date!")
+                        break
+
+                    elif status == "failed":
+                        print(f"AI failed to process '{original_filename}'. Error : {error_msg}")
+                        append_to_log("INGEST", f"FAILED: {original_filename}", [])
+                        break
+
+                    elif status == "pending":
+                        print("...", end="\r")
+
+            except requests.exceptions.ConnectionError:
+                print("Lost connection to server while waiting. Retrying...")
+            time.sleep(5)
+    finally:
+        print("Cleaning up job on server...")
+        
         try:
-            res = requests.get(f"{SERVER_URL}/wiki/job/{job_id}", headers=headers)
-
-            if res.status_code == 200:
-                job_data = res.json()
-                status   = job_data.get("status")
-
-                if status == "completed":
-                    print("\n  AI finished. Executing integration plan locally...")
-                    plan = job_data.get("markdown_content", {}) # Changed plan to markdown_content
-
-                    note_filename = plan.get(
-                        "note_filename",
-                        os.path.splitext(original_filename)[0].replace(" ", "_")
-                    )
-
-                    # Step 1: Save the new note 
-                    note_path = os.path.join(NOTES_DIR, f"{note_filename}.md")
-                    with open(note_path, "w", encoding="utf-8") as f:
-                        f.write(plan.get("note_content", ""))
-                    print(f"Saved note: {note_filename}.md")
-
-                    # Step 2: Append to index (never rewrite)
-                    index_entry    = plan.get("index_entry", "")
-                    index_category = plan.get("index_category", "General")
-                    if index_entry:
-                        append_to_index(index_entry, index_category)
-                    print("Index updated")
-
-                    # Step 3: Backfill cross-links (bidirectional) 
-                    affected = [note_filename]
-                    for target in plan.get("cross_links", []):
-                        target_path = find_local_page(target)
-                        if target_path:
-                            backfill_local_crosslink(target_path, note_filename)
-                            affected.append(target)
-                            print(f"Backfilled link into: {target}.md")
-                        else:
-                            print(f"Cross-link target not found on disk: {target}")
-
-                    # Step 4: Append to log 
-                    append_to_log("INGEST", note_filename, affected)
-                    print("Log updated")
-
-                    print(f"\n  Integration complete. Vault is up to date!")
-                    break
-
-                elif status == "failed":
-                    print(f"AI failed to process '{original_filename}'.")
-                    append_to_log("INGEST", f"FAILED: {original_filename}", [])
-                    break
-
-                elif status == "pending":
-                    print("...", end="\r")
-
-        except requests.exceptions.ConnectionError:
-            print("Lost connection to server while waiting. Retrying...")
-
-        time.sleep(5)
-
+            del_res = requests.delete(f"{SERVER_URL}/wiki/delete-job/{job_id}", headers=headers)
+            if del_res.status_code == 200:
+                print(f"{del_res.json().get('message', 'Cleanup successful.')}")
+            else:
+                print(f"Cleanup failed with status {del_res.status_code}: {del_res.text}")
+        except Exception as e:
+            print(f" Network error during cleanup: {e}")
 
 # FILE WATCHER
 class FileDropHandler(FileSystemEventHandler):

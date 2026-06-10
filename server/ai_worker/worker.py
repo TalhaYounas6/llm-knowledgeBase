@@ -68,7 +68,11 @@ def process_job_async(ch, connection, method, ticket):
     except Exception as e:
         print(f" AI processing failed for job {jobId}: {e}")
         try:
-            requests.put(f"{SERVER_URL}/wiki/internal/job/{jobId}", json={"status": "failed"})
+            payload = {
+                "status": "failed",
+                "error" : str(e)
+            }
+            requests.put(f"{SERVER_URL}/wiki/internal/job/{jobId}", json=payload)
         except Exception as net_err:
             print(f"Could not notify backend server of failure for job {jobId}: {net_err}")
 

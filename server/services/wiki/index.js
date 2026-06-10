@@ -203,7 +203,7 @@ export const jobStatus = async(jobId,userId)=>{
 }
 
 
-export const completeJob = async(id,status,plan)=>{
+export const completeJob = async(id,status,plan,error)=>{
 
     const job = await IngestJob.findOne({where:{id:id}});
 
@@ -213,7 +213,20 @@ export const completeJob = async(id,status,plan)=>{
 
     job.status= status;
     job.markdown_result = plan;
-
+    job.error_message = error;
     await job.save();
     
+}
+
+export const deleteJob = async(jobId,userId)=>{
+    const job = await IngestJob.findOne({where:{id:jobId,userId:userId}});
+
+    if(!job){
+        throw new Error("No job exists!")
+    }
+
+    if (job.status === 'completed') {
+        await IngestJob.destroy({ where: { id: job.id } });
+    }
+ 
 }
