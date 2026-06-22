@@ -69,9 +69,9 @@ export const completeJobController = asyncHandler(async(req,res)=>{
 })
 
 export const deleteJobController = asyncHandler(async(req,res)=>{
-    const {job_id} = req.params;
+    const {jobId} = req.params;
     
-    await deleteJob(job_id,req.user.id);
+    await deleteJob(jobId,req.user.id);
 
     res.status(200).json({message:"Job deleted successfully after completion"});
 })

@@ -642,6 +642,11 @@ def poll_for_result(job_id, api_key, original_filename):
                         affected = [note_filename]
                         for target in plan.get("cross_links", []):
                             target_path = find_local_page(target)
+                            # Skip backfilling into concepts/Query pages
+                            if CONCEPTS_DIR in os.path.abspath(target_path):
+                                print(f"Skipped backfill into concept page: {target}")
+                                continue
+
                             if target_path:
                                 backfill_local_crosslink(target_path, note_filename)
                                 affected.append(target)

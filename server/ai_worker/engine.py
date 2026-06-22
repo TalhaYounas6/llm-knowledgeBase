@@ -206,6 +206,16 @@ def delete_gemini_file(file_name: str, user_key: str):
 
 # Markdown assembler with Python, no LLM involvement
 
+def clean_section_body(body: str) -> str:
+    # remove stray heading markers the model may have echoed from source text
+    # but only at the start of a line followed by a space — avoids breaking
+    # legitimate inline use of # in code blocks or text
+    body = re.sub(r'(?m)^#{2,6}\s+', '', body)
+    # normalize asterisk bullets to dash bullets — avoids "* text" being
+    # misread as the start of a bold span if the closing ** never appears
+    body = re.sub(r'(?m)^\*\s+', '- ', body)
+    return body
+
 def assemble_markdown(note: WikiNote, doc_type: str, today: str) -> str:
     def quote(s: str) -> str:
         return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
@@ -232,7 +242,8 @@ def assemble_markdown(note: WikiNote, doc_type: str, today: str) -> str:
     for i, section in enumerate(note.sections, 1):
         lines.append(f"## {i}. {section.heading}")
         lines.append("")
-        body = re.sub(r'\n{3,}', '\n\n', section.body.strip())
+        body = clean_section_body(section.body.strip())
+        body = re.sub(r'\n{3,}', '\n\n', body)
         lines.append(body)
         lines.append("")
 
@@ -321,6 +332,19 @@ def build_note_generation_prompt() -> str:
         "  - Use tables for comparative or multi-attribute data\n"
         "  - Use code blocks with language tags for any code or commands\n"
         "  - Bold (**term**) key terms on first definition only\n\n"
+
+        "SOURCE FIDELITY RULES:\n"
+        "  The source document (especially slides) may contain visual formatting cues —\n"
+        "  bullet glyphs, bold headers, asterisks used as list markers, or markdown-like\n"
+        "  symbols (###, **, *) embedded in the extracted text. These are NOT content,\n"
+        "  they are presentation artifacts from the original slide layout.\n"
+        "  Do NOT copy these symbols literally into your output.\n"
+        "  Rewrite the underlying information into clean prose or proper markdown\n"
+        "  bullet lists (using '- ' for list items, not '*').\n"
+        "  Only use ** for bolding a term you are deliberately emphasizing on first\n"
+        "  definition — never because the source happened to render it that way.\n"
+        "  If a slide title looks like a heading in the source, treat it as a cue for\n"
+        "  what the section is about, not something to reproduce verbatim with hashes.\n\n"
 
         "CHARACTER BUDGET — use this to calibrate your output length:\n"
         "  Total note target:    {total_char_budget} characters\n"
