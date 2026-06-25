@@ -12,8 +12,6 @@ from google import genai as google_genai
 from markitdown import MarkItDown
 
 
-# Pydantic schemas
-
 class DocumentClassification(BaseModel):
     doc_type: str = Field(
         description=(
@@ -22,6 +20,13 @@ class DocumentClassification(BaseModel):
         )
     )
     suggested_sections: list[str] = Field(
+        default=[
+            "Overview",
+            "Core Concepts",
+            "Key Details",
+            "Implications",
+            "Open Questions"
+        ],
         description=(
             "Ordered list of section headings appropriate for this document type. "
             "Examples for Research: ['Executive Summary', 'Core Concepts and Entities', "
@@ -129,10 +134,7 @@ class WikiMetadata(BaseModel):
     )
 
 
-# Extraction — MarkItDown for classification preview, Gemini File API for full note
-
 def extract_preview(file_path: str) -> str:
-    
     md = MarkItDown()
     try:
         result = md.convert(file_path)
@@ -142,8 +144,6 @@ def extract_preview(file_path: str) -> str:
         return ""
 
 
-
-# 1. Keep your robust fallback map handy
 GEMINI_MIME_MAP = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -159,43 +159,32 @@ GEMINI_MIME_MAP = {
 }
 
 def get_mime_type(file_path: str) -> str:
-    """Dynamically determines the MIME type based on the file extension."""
     ext = os.path.splitext(file_path)[1].lower()
     if ext in GEMINI_MIME_MAP:
         return GEMINI_MIME_MAP[ext]
-    
     mime_type, _ = mimetypes.guess_type(file_path)
     return mime_type or "application/octet-stream"
 
 
 def upload_to_gemini(file_path: str, user_key: str, original_filename: str):
     client = genai.Client(api_key=user_key)
-    
-    
     detected_mime = get_mime_type(original_filename)
-    
     print(f"  Uploading to Gemini File API: {os.path.basename(file_path)} (Detected as {detected_mime})...")
-    
-    
     uploaded = client.files.upload(
         file=file_path,
         config={"mime_type": detected_mime}
     )
-
     while uploaded.state.name == "PROCESSING":
         print(f"  File processing... waiting")
         time.sleep(2)
         uploaded = client.files.get(name=uploaded.name)
-    
     if uploaded.state.name == "FAILED":
         raise Exception(f"Gemini file upload failed: {uploaded.name}")
-    
     print(f"  Upload complete. Name: {uploaded.name}")
     return uploaded
 
 
 def delete_gemini_file(file_name: str, user_key: str):
-    # Clean up uploaded file from Gemini File API after processing
     try:
         client = google_genai.Client(api_key=user_key)
         client.files.delete(name=file_name)
@@ -204,17 +193,47 @@ def delete_gemini_file(file_name: str, user_key: str):
         print(f"  Could not delete Gemini file {file_name}: {e}")
 
 
-# Markdown assembler with Python, no LLM involvement
+def clean_broken_tables(body: str) -> str:
+    lines  = body.split('\n')
+    result = []
+    i      = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip().startswith('|') and line.strip().endswith('|'):
+            table_lines = []
+            while i < len(lines) and lines[i].strip().startswith('|'):
+                table_lines.append(lines[i])
+                i += 1
+            col_counts = []
+            for tl in table_lines:
+                stripped = tl.strip().strip('|')
+                if re.match(r'^[\s\-\:\|]+$', stripped):
+                    continue
+                cols = len(stripped.split('|'))
+                col_counts.append(cols)
+            if col_counts and len(set(col_counts)) == 1:
+                result.extend(table_lines)
+            else:
+                print(f"  Malformed table detected, converting to bullets.")
+                for tl in table_lines:
+                    stripped = tl.strip().strip('|')
+                    if re.match(r'^[\s\-\:\|]+$', stripped):
+                        continue
+                    cells = [c.strip() for c in stripped.split('|') if c.strip()]
+                    if cells:
+                        result.append(f"- {' — '.join(cells)}")
+        else:
+            result.append(line)
+            i += 1
+    return '\n'.join(result)
+
 
 def clean_section_body(body: str) -> str:
-    # remove stray heading markers the model may have echoed from source text
-    # but only at the start of a line followed by a space — avoids breaking
-    # legitimate inline use of # in code blocks or text
     body = re.sub(r'(?m)^#{2,6}\s+', '', body)
-    # normalize asterisk bullets to dash bullets — avoids "* text" being
-    # misread as the start of a bold span if the closing ** never appears
     body = re.sub(r'(?m)^\*\s+', '- ', body)
+    body = clean_broken_tables(body)
     return body
+
 
 def assemble_markdown(note: WikiNote, doc_type: str, today: str) -> str:
     def quote(s: str) -> str:
@@ -239,16 +258,20 @@ def assemble_markdown(note: WikiNote, doc_type: str, today: str) -> str:
     lines.append("---")
     lines.append("")
 
-    for i, section in enumerate(note.sections, 1):
-        lines.append(f"## {i}. {section.heading}")
-        lines.append("")
+    section_num = 1
+    for section in note.sections:
         body = clean_section_body(section.body.strip())
         body = re.sub(r'\n{3,}', '\n\n', body)
+        if not body:
+            print(f"  Skipped empty section: {section.heading}")
+            continue
+        lines.append(f"## {section_num}. {section.heading}")
+        lines.append("")
         lines.append(body)
         lines.append("")
+        section_num += 1
 
-    next_num = len(note.sections) + 1
-    lines.append(f"## {next_num}. References and Related")
+    lines.append(f"## {section_num}. References and Related")
     lines.append("")
 
     if note.source_citations:
@@ -275,8 +298,6 @@ def assemble_markdown(note: WikiNote, doc_type: str, today: str) -> str:
 
     return "\n".join(lines)
 
-
-# Prompts
 
 def build_classification_prompt() -> str:
     return (
@@ -344,7 +365,18 @@ def build_note_generation_prompt() -> str:
         "  Only use ** for bolding a term you are deliberately emphasizing on first\n"
         "  definition — never because the source happened to render it that way.\n"
         "  If a slide title looks like a heading in the source, treat it as a cue for\n"
-        "  what the section is about, not something to reproduce verbatim with hashes.\n\n"
+        "  what the section is about, not something to reproduce verbatim with hashes.\n"
+        "  Slide decks often repeat the same title across multiple continuation slides\n"
+        "  (e.g. 'Technical Implementation', 'Technical Implementation (cont.)',\n"
+        "  'Technical Implementation 2/5'). Do NOT create a separate section for each\n"
+        "  continuation slide. Merge all content from continuation slides into one\n"
+        "  section under a single heading. A section with no substantive content\n"
+        "  should not exist — if a slide has no text beyond its title, skip it.\n"
+        "  Only use markdown tables for data that is genuinely tabular — where rows and\n"
+        "  columns are meaningful and every cell has a value. Do NOT attempt to force\n"
+        "  side-by-side slide layouts, comparison bullet lists, or multi-column slide\n"
+        "  content into tables. If the columns would be uneven or cells empty, use a\n"
+        "  bullet list or prose instead.\n\n"
 
         "CHARACTER BUDGET — use this to calibrate your output length:\n"
         "  Total note target:    {total_char_budget} characters\n"
@@ -410,46 +442,35 @@ def build_meta_system_prompt() -> str:
     )
 
 
-# Main function
-
 def generate_integration_plan(
     file_path: str,
     user_key: str,
     original_filename: str,
     schema_text: str,
     index_text: str,
-    log_tail: str = ""
+    log_tail: str = "",
+    progress_callback=None
 ):
-    # Call 1 — fast classification using MarkItDown text preview (no ML models)
-    # Call 2 — structured note generation using Gemini File API natively
-    # Call 3 — metadata: index entry, category, cross-links
-    # Python assembler converts WikiNote to perfect Obsidian markdown
+    def emit_progress(stage: str, stage_message: str):
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(stage, stage_message)
+        except Exception as callback_error:
+            print(f"  Progress callback failed: {callback_error}")
 
-    # Quick text preview for classification 
-    ext = os.path.splitext(original_filename)[1]
-    if not file_path.lower().endswith(ext.lower()):
-        new_file_path = file_path + ext
-        os.rename(file_path, new_file_path)
-        file_path = new_file_path
+    # Using original temp file path directly
     text_preview = extract_preview(file_path)
 
-    # Upload file to Gemini for native reading in Call 2
-    gemini_file = upload_to_gemini(file_path, user_key,original_filename)
+    emit_progress("uploading", f"Uploading {original_filename} to Server")
+    gemini_file = upload_to_gemini(file_path, user_key, original_filename)
 
-    # Char budget based on file size estimate from preview
-    # Use preview length scaled up as a rough input size proxy
-    # For classification we only need the budget after we know section count
-    # so we compute a base budget here and refine after classification
-    preview_scale   = max(1, len(text_preview))
-    # MarkItDown preview is first 3000 chars of full extraction
-    # estimate full doc chars as preview_scale * ratio, floor at 5000
     file_size_bytes   = os.path.getsize(file_path)
     estimated_input   = file_size_bytes // 3
     total_char_budget = max(8000, min(60000, int(estimated_input * 0.45)))
 
     print(f"  Total char budget:       {total_char_budget:,}")
 
-    # Safe filename derivation
     note_filename = os.path.splitext(original_filename)[0]
     note_filename = re.sub(r'\s*-\s*Copy$', '', note_filename, flags=re.IGNORECASE)
     note_filename = note_filename.replace(" ", "_")
@@ -463,7 +484,6 @@ def generate_integration_plan(
         HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT:  HarmBlockThreshold.BLOCK_NONE,
     }
 
-    # Call 1 — classification (text-based, fast, cheap)
     classify_llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         google_api_key=user_key,
@@ -473,11 +493,12 @@ def generate_integration_plan(
     )
     structured_classify_llm = classify_llm.with_structured_output(DocumentClassification)
     classify_prompt = ChatPromptTemplate.from_messages([
-        ("user", build_classification_prompt()),  # changed system to user
+        ("user", build_classification_prompt()),
     ])
     classify_chain = classify_prompt | structured_classify_llm
 
     print(f"  Brain [1/3]: Classifying '{original_filename}'...")
+    emit_progress("classifying", f"Classifying {original_filename}")
     classification = classify_chain.invoke({
         "raw_text_preview": text_preview
     })
@@ -486,18 +507,13 @@ def generate_integration_plan(
     suggested_sections = ", ".join(classification.suggested_sections)
     num_sections       = len(classification.suggested_sections)
 
-    # Refine char budget
     per_section_budget = max(500, total_char_budget // max(1, num_sections))
-    # citations_budget   = max(500, int(total_char_budget * 0.15))
 
     print(f"  Detected type:     {doc_type}")
     print(f"  Sections:          {suggested_sections}")
     print(f"  Per-section budget: {per_section_budget:,} chars")
 
-    # Call 2 — note generation using Gemini File API natively
-    # The model reads the uploaded file directly — no text extraction needed
-    # using google-genai client directly here because LangChain does not
-    # cleanly support passing a File API reference with structured output
+    emit_progress("generating_note", f"Generating structured note for {original_filename}")
     client = google_genai.Client(api_key=user_key)
 
     system_prompt = build_note_generation_prompt().format(
@@ -563,9 +579,8 @@ def generate_integration_plan(
                 )
             )
 
-            # Parse the structured response into WikiNote
             import json
-            raw_json = response.text
+            raw_json  = response.text
             wiki_note = WikiNote.model_validate(json.loads(raw_json))
             break
 
@@ -575,7 +590,6 @@ def generate_integration_plan(
             if attempt < 2:
                 print(f"  Retrying...")
 
-    # Clean up uploaded file from Gemini regardless of success or failure
     delete_gemini_file(gemini_file.name, user_key)
 
     if wiki_note is None:
@@ -585,7 +599,6 @@ def generate_integration_plan(
     print(f"  Citations found:    {len(wiki_note.source_citations)}")
     print(f"  See Also entries:   {len(wiki_note.see_also)}")
 
-    # Python assembler 
     note_content = assemble_markdown(wiki_note, doc_type, today)
     actual_chars = len(note_content)
 
@@ -595,7 +608,7 @@ def generate_integration_plan(
     if actual_chars > estimated_input * 2:
         print(f"  WARNING: Note may be verbose relative to input size.")
 
-    # Call 3 — metadata
+    emit_progress("generating_metadata", f"Generating metadata for {original_filename}")
     meta_llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         google_api_key=user_key,
@@ -626,6 +639,7 @@ def generate_integration_plan(
 
     print(f"  Cross-links identified: {meta_result.cross_links}")
     print(f"  Index category:         {meta_result.index_category}")
+    emit_progress("finalizing", f"Finalizing integration plan for {original_filename}")
 
     return {
         "note_filename":  note_filename,

@@ -1,28 +1,49 @@
 import os
 import time
 import json
+import re
+import signal
+import threading
 import requests
 import pwinput
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-import re
 
 # CONFIGURATION
-SERVER_URL         = "http://localhost:3000"
-CONFIG_FILE        = "config.json"
-INPUT_FOLDER       = "./Raw_Sources"
-OUTPUT_FOLDER      = "./Wiki_Notes"
-ALLOW_DEFAULT_LLM  = False
-LOG_TAIL_LINES     = 20        # number of recent log entries to send to the engine
+SERVER_URL = "http://localhost:3000"
+CONFIG_FILE = "config.json"
+INPUT_FOLDER = "./Raw_Sources"
+OUTPUT_FOLDER = "./Wiki_Notes"
+ALLOW_DEFAULT_LLM = False
+LOG_TAIL_LINES = 20
+
+# Global stop state for Ctrl+C
+STOP_REQUESTED = threading.Event()
+ACTIVE_OBSERVER = None
+
+
+def _handle_sigint(signum, frame):
+    STOP_REQUESTED.set()
+    print("\nInterrupt received. Stopping current operation...")
+
+    global ACTIVE_OBSERVER
+    if ACTIVE_OBSERVER is not None:
+        try:
+            ACTIVE_OBSERVER.stop()
+        except Exception:
+            pass
+
+
+signal.signal(signal.SIGINT, _handle_sigint)
 
 # Local Wiki Paths
-NOTES_DIR    = os.path.join(OUTPUT_FOLDER, "notes")
+NOTES_DIR = os.path.join(OUTPUT_FOLDER, "notes")
 CONCEPTS_DIR = os.path.join(OUTPUT_FOLDER, "concepts")
 ENTITIES_DIR = os.path.join(OUTPUT_FOLDER, "entities")
-INDEX_PATH   = os.path.join(OUTPUT_FOLDER, "index.md")
-LOG_PATH     = os.path.join(OUTPUT_FOLDER, "log.md")
-SCHEMA_PATH  = os.path.join(OUTPUT_FOLDER, "SCHEMA.md")
+INDEX_PATH = os.path.join(OUTPUT_FOLDER, "index.md")
+LOG_PATH = os.path.join(OUTPUT_FOLDER, "log.md")
+SCHEMA_PATH = os.path.join(OUTPUT_FOLDER, "SCHEMA.md")
 
 # Ensure all local directories exist
 for folder in [INPUT_FOLDER, OUTPUT_FOLDER, NOTES_DIR, CONCEPTS_DIR, ENTITIES_DIR]:
@@ -30,8 +51,8 @@ for folder in [INPUT_FOLDER, OUTPUT_FOLDER, NOTES_DIR, CONCEPTS_DIR, ENTITIES_DI
 
 
 # DEFAULT SCHEMA TEMPLATE
-# Written to SCHEMA.md on first run.
-DEFAULT_SCHEMA = """# Wiki Schema & Constitution
+DEFAULT_SCHEMA = """
+# Wiki Schema & Constitution
 
 > The LLM's operating manual. Every operation — Ingest, Query, Lint — reads this file first.
 > Edit the categories, wikilink targets, and domain notes to match your knowledge domain.
@@ -201,10 +222,12 @@ Example:
   evaluation metrics (precision, recall, F1), and baseline comparisons.
 
 (Edit this section to describe your own domain.)
+
 """
 
 # DEFAULT INDEX TEMPLATE
-DEFAULT_INDEX = """# Wiki Index
+DEFAULT_INDEX = """
+# Wiki Index
 
 > Master catalog of all pages. Updated on every ingest.
 > Format: | [[Filename]] | Summary | Category | Date |
@@ -229,10 +252,9 @@ DEFAULT_INDEX = """# Wiki Index
 ## General
 | Page | Summary | Category | Date |
 |------|---------|----------|------|
-
 """
 
-# DEFAULT LOG TEMPLATE 
+# DEFAULT LOG TEMPLATE
 DEFAULT_LOG = f"""# Wiki Log
 > Append-only chronological record of all wiki operations.
 > Query with: grep "^## \\[" log.md | tail -20
@@ -250,7 +272,6 @@ DEFAULT_LOG = f"""# Wiki Log
 """
 
 
-# Make Special Files
 def bootstrap_wiki():
     """
     Creates SCHEMA.md, index.md, and log.md with full default content
@@ -272,17 +293,18 @@ def bootstrap_wiki():
         print("Created log.md.")
 
 
-# --- HELPER FUNCTIONS ---
 def save_local_key(api_key):
-    with open(CONFIG_FILE, "w") as f:
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump({"api_key": api_key}, f)
+
 
 def get_local_key():
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data.get("api_key")
     return None
+
 
 def verify_token(api_key):
     try:
@@ -296,6 +318,7 @@ def verify_token(api_key):
         print("Check your internet connection.")
         return False
 
+
 def ask_user(prompt_text, is_password=False):
     display_prompt = f"{prompt_text} (or type 'back'): "
     while True:
@@ -306,7 +329,7 @@ def ask_user(prompt_text, is_password=False):
 
         val = val.strip()
 
-        if val.lower() in ['back', 'cancel', 'exit']:
+        if val.lower() in ["back", "cancel", "exit"]:
             print("\nAction cancelled. Returning to menu...")
             return None
 
@@ -316,24 +339,23 @@ def ask_user(prompt_text, is_password=False):
 
         return val
 
+
 def get_log_tail(n=LOG_TAIL_LINES):
-   
     if not os.path.exists(LOG_PATH):
         return ""
     with open(LOG_PATH, "r", encoding="utf-8") as f:
         content = f.read()
-    # Each entry starts with "## ["
-    entries=[]
+
+    entries = []
     cont = content.split("\n## [")
     for e in cont:
         if e.strip():
             entries.append(e)
-  
+
     tail = entries[-n:] if len(entries) > n else entries
     return "\n## [".join(tail)
 
 
-# LOCAL VAULT UTILITIES
 def find_local_page(name):
     """Searches all wiki subdirectories for an existing page to backlink."""
     for subdir in [NOTES_DIR, CONCEPTS_DIR, ENTITIES_DIR]:
@@ -342,58 +364,48 @@ def find_local_page(name):
             return candidate
     return None
 
+
 def backfill_local_crosslink(target_path, new_note_name):
     """
     Appends a backlink to an existing page's Vault Pages subsection.
-    Never rewrites the file — only appends. Skips if link already exists.
+    Never rewrites the file - only appends. Skips if link already exists.
     """
     with open(target_path, "r", encoding="utf-8") as f:
         content = f.read()
 
     backlink = f"- [[{new_note_name}]]"
     if backlink in content:
-        return  # Already linked, skip
+        return
 
-    # Target the Vault Pages subsection specifically
-    # This is where backlinks belong per the note structure
     if "### Vault Pages" in content:
         new_content = content.replace(
             "(backfilled automatically on ingest)",
             f"(backfilled automatically on ingest)\n{backlink}"
         )
-
-    # Fallback: older notes or notes without Vault Pages subsection
-    # Check for any variant of the References section header
-    elif re.search(r'##\s+(?:\d+\.\s+)?References', content, re.IGNORECASE):
+    elif re.search(r"##\s+(?:\d+\.\s+)?References", content, re.IGNORECASE):
         new_content = content + f"\n{backlink}"
-
     else:
-        # No References section at all — create the full structure
         new_content = (
-            content +
-            f"\n\n## References and Related\n\n"
-            f"### Vault Pages\n"
-            f"(backfilled automatically on ingest)\n"
-            f"{backlink}"
+            content
+            + f"\n\n## References and Related\n\n"
+            + f"### Vault Pages\n"
+            + f"(backfilled automatically on ingest)\n"
+            + f"{backlink}"
         )
 
     with open(target_path, "w", encoding="utf-8") as f:
         f.write(new_content)
 
+
 def append_to_log(action, title, affected_files):
-    
-    timestamp    = datetime.now().strftime("%Y-%m-%d %H:%M")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     affected_str = ", ".join(affected_files)
-    log_line     = f"\n## [{timestamp}] {action} | {title} | {affected_str}"
+    log_line = f"\n## [{timestamp}] {action} | {title} | {affected_str}"
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(log_line)
 
+
 def append_to_index(index_entry, category):
-    """
-    Inserts the index entry under the correct category section.
-    If the category doesn't exist yet, creates a new section.
-    Never rewrites existing entries.
-    """
     with open(INDEX_PATH, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
@@ -406,19 +418,17 @@ def append_to_index(index_entry, category):
     while i < len(lines):
         new_lines.append(lines[i])
         if lines[i] == section_header:
-            # Append the table header row
             if i + 1 < len(lines):
                 new_lines.append(lines[i + 1])
                 i += 1
-            # Only insert after the divider row, verify it actually is one
             if i + 1 < len(lines) and lines[i + 1].startswith("|---"):
                 new_lines.append(lines[i + 1])
                 i += 1
                 new_lines.append(new_entry)
                 inserted = True
         i += 1
+
     if not inserted:
-        # Category doesn't exist yet sop append a new section at the end
         new_lines.append(f"\n## {category}\n")
         new_lines.append("| Page | Summary | Category | Date |\n")
         new_lines.append("|------|---------|----------|------|\n")
@@ -427,10 +437,8 @@ def append_to_index(index_entry, category):
     with open(INDEX_PATH, "w", encoding="utf-8") as f:
         f.writelines(new_lines)
 
-# QUERY UTILITIES
 
 def read_local_page(filename):
-    # reads a page from any vault subdirectory by filename without extension
     path = find_local_page(filename)
     if path and os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -439,7 +447,6 @@ def read_local_page(filename):
 
 
 def send_query(api_key, question, page_contents=None):
-    # sends query to server with index, schema, and any pre-loaded page contents
     with open(INDEX_PATH, "r", encoding="utf-8") as f:
         index_text = f.read()
     with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
@@ -447,9 +454,9 @@ def send_query(api_key, question, page_contents=None):
 
     headers = {"Authorization": f"Bearer {api_key}"}
     payload = {
-        "question":     question,
-        "indexText":    index_text,
-        "schemaText":   schema_text,
+        "question": question,
+        "indexText": index_text,
+        "schemaText": schema_text,
         "pageContents": page_contents or {}
     }
 
@@ -467,14 +474,12 @@ def send_query(api_key, question, page_contents=None):
 
 
 def persist_answer(answer, question, api_key):
-    today     = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    slug      = re.sub(r'[^a-zA-Z0-9 ]', '', question)[:50].strip().replace(" ", "_")
-    filename  = f"Query_{slug}_{timestamp}"
+    slug = re.sub(r"[^a-zA-Z0-9 ]", "", question)[:50].strip().replace(" ", "_")
+    filename = f"Query_{slug}_{timestamp}"
 
-    # extract wikilinks from the answer — these are the pages the model cited
-    cited_pages = re.findall(r'\[\[([^\]]+)\]\]', answer)
-    # deduplicate while preserving order
+    cited_pages = re.findall(r"\[\[([^\]]+)\]\]", answer)
     seen = set()
     unique_cited = []
     for p in cited_pages:
@@ -482,7 +487,6 @@ def persist_answer(answer, question, api_key):
             seen.add(p)
             unique_cited.append(p)
 
-    # build vault pages section from cited wikilinks
     if unique_cited:
         vault_pages_lines = "\n".join(f"- [[{p}]]" for p in unique_cited)
     else:
@@ -518,7 +522,6 @@ status: fresh
         f.write(note_content)
     print(f"Saved: {filename}.md")
 
-    # backfill bidirectionally — the cited pages should link back to this concept
     affected = [f"concepts/{filename}.md"]
     for cited in unique_cited:
         target_path = find_local_page(cited)
@@ -534,6 +537,7 @@ status: fresh
     append_to_log("PERSIST", filename, affected)
     print("Index and log updated.")
 
+
 def action_query(api_key):
     print("\n--- QUERY WIKI ---")
     print("Ask a question about your knowledge base.")
@@ -546,7 +550,6 @@ def action_query(api_key):
     print("Reading local vault context...")
 
     try:
-        # first call — no page contents, let the model identify what it needs
         print("Sending query to server...")
         result = send_query(api_key, question)
 
@@ -556,7 +559,6 @@ def action_query(api_key):
 
             page_contents = {}
             for page in missing:
-                # strip .md and any path prefix the model may have included
                 name = os.path.basename(page).replace(".md", "")
                 content = read_local_page(name)
                 if content:
@@ -577,11 +579,11 @@ def action_query(api_key):
             print("No answer returned.")
             return
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("ANSWER")
-        print("="*60)
+        print("=" * 60)
         print(answer)
-        print("="*60 + "\n")
+        print("=" * 60 + "\n")
 
         append_to_log("QUERY", f'"{question[:60]}"', ["answered"])
 
@@ -600,61 +602,68 @@ def action_query(api_key):
     except Exception as e:
         print(f"Query failed: {e}")
 
-# POLLING & EXECUTION LOGIC
+
 def poll_for_result(job_id, api_key, original_filename):
     print(f"  Waiting for Cloud AI to process '{original_filename}'...")
     headers = {"Authorization": f"Bearer {api_key}"}
+    cancelled = False
+    last_progress_line = None
 
-    
     try:
-        while True:
+        while not STOP_REQUESTED.is_set():
             try:
-                res = requests.get(f"{SERVER_URL}/wiki/job/{job_id}", headers=headers)
+                res = requests.get(
+                    f"{SERVER_URL}/wiki/job/{job_id}",
+                    headers=headers,
+                    timeout=15
+                )
 
                 if res.status_code == 200:
                     job_data = res.json()
-                    status   = job_data.get("status")
+                    status = job_data.get("status")
+                    stage = job_data.get("stage")
+                    stage_message = job_data.get("stage_message")
                     error_msg = job_data.get("error_message")
 
                     if status == "completed":
                         print("\n  AI finished. Executing integration plan locally...")
-                        plan = job_data.get("markdown_content", {}) # Changed plan to markdown_content
+                        plan = job_data.get("markdown_content", {})
 
                         note_filename = plan.get(
                             "note_filename",
                             os.path.splitext(original_filename)[0].replace(" ", "_")
                         )
 
-                        # Step 1: Save the new note 
                         note_path = os.path.join(NOTES_DIR, f"{note_filename}.md")
                         with open(note_path, "w", encoding="utf-8") as f:
                             f.write(plan.get("note_content", ""))
                         print(f"Saved note: {note_filename}.md")
 
-                        # Step 2: Append to index (never rewrite)
-                        index_entry    = plan.get("index_entry", "")
+                        index_entry = plan.get("index_entry", "")
                         index_category = plan.get("index_category", "General")
                         if index_entry:
                             append_to_index(index_entry, index_category)
                         print("Index updated")
 
-                        # Step 3: Backfill cross-links (bidirectional) 
                         affected = [note_filename]
                         for target in plan.get("cross_links", []):
                             target_path = find_local_page(target)
-                            # Skip backfilling into concepts/Query pages
-                            if CONCEPTS_DIR in os.path.abspath(target_path):
+
+                            if not target_path:
+                                print(f"Cross-link target not found on disk: {target}")
+                                continue
+
+                            concept_root = os.path.abspath(CONCEPTS_DIR) + os.sep
+                            abs_target = os.path.abspath(target_path)
+
+                            if abs_target.startswith(concept_root):
                                 print(f"Skipped backfill into concept page: {target}")
                                 continue
 
-                            if target_path:
-                                backfill_local_crosslink(target_path, note_filename)
-                                affected.append(target)
-                                print(f"Backfilled link into: {target}.md")
-                            else:
-                                print(f"Cross-link target not found on disk: {target}")
+                            backfill_local_crosslink(target_path, note_filename)
+                            affected.append(target)
+                            print(f"Backfilled link into: {target}.md")
 
-                        # Step 4: Append to log 
                         append_to_log("INGEST", note_filename, affected)
                         print("Log updated")
 
@@ -662,21 +671,66 @@ def poll_for_result(job_id, api_key, original_filename):
                         break
 
                     elif status == "failed":
-                        print(f"AI failed to process '{original_filename}'. Error : {error_msg}")
+                        if stage or stage_message:
+                            print(f"\n  Failed at stage: {stage or 'unknown'}")
+                            if stage_message:
+                                print(f"  Last message: {stage_message}")
+                        print(f"AI failed to process '{original_filename}'. Error: {error_msg}")
                         append_to_log("INGEST", f"FAILED: {original_filename}", [])
                         break
 
-                    elif status == "pending":
-                        print("...", end="\r")
+                    elif status in ("pending", "processing"):
+                        progress_line = stage_message or stage or "Working..."
+                        if progress_line != last_progress_line:
+                            if stage:
+                                print(f"\n  {stage}: {progress_line}")
+                            else:
+                                print(f"\n  {progress_line}")
+                            last_progress_line = progress_line
+
+                    else:
+                        print(f"\nUnexpected job status '{status}' for job {job_id}.")
+                        break
+
+                elif res.status_code == 404:
+                    print(f"\nJob {job_id} no longer exists on the server.")
+                    break
+
+                elif res.status_code >= 500:
+                    print("Server is busy at the moment. Please try again later.")
+                    break
+
+                else:
+                    print(f"\nUnexpected server response while polling job {job_id}: {res.status_code}")
+                    break
+
+            except requests.exceptions.Timeout:
+                print("Server is busy at the moment. Please try again later.")
+                break
 
             except requests.exceptions.ConnectionError:
-                print("Lost connection to server while waiting. Retrying...")
+                print("Server is busy at the moment. Please try again later.")
+                break
+
             time.sleep(5)
+
+    except KeyboardInterrupt:
+        cancelled = True
+        print("\nPolling cancelled by user.")
+
     finally:
+        if cancelled or STOP_REQUESTED.is_set():
+            print("Skipping server cleanup because polling was cancelled.")
+            return
+
         print("Cleaning up job on server...")
-        
+
         try:
-            del_res = requests.delete(f"{SERVER_URL}/wiki/delete-job/{job_id}", headers=headers)
+            del_res = requests.delete(
+                f"{SERVER_URL}/wiki/delete-job/{job_id}",
+                headers=headers,
+                timeout=15
+            )
             if del_res.status_code == 200:
                 print(f"{del_res.json().get('message', 'Cleanup successful.')}")
             else:
@@ -684,7 +738,7 @@ def poll_for_result(job_id, api_key, original_filename):
         except Exception as e:
             print(f" Network error during cleanup: {e}")
 
-# FILE WATCHER
+
 class FileDropHandler(FileSystemEventHandler):
     def __init__(self, api_key):
         self.api_key = api_key
@@ -693,12 +747,11 @@ class FileDropHandler(FileSystemEventHandler):
         if event.is_directory or os.path.basename(event.src_path).startswith("."):
             return
 
-        time.sleep(1)  # Brief wait to ensure file is fully written
+        time.sleep(1)
         file_path = event.src_path
-        filename  = os.path.basename(file_path)
+        filename = os.path.basename(file_path)
 
-        # Only process supported file types
-        supported = {".pdf", ".docx", ".txt", ".html", ".md"}
+        supported = {".pdf", ".docx", ".txt", ".md"}
         _, ext = os.path.splitext(filename)
         if ext.lower() not in supported:
             print(f"\n  Skipped unsupported file type: {filename}")
@@ -707,7 +760,6 @@ class FileDropHandler(FileSystemEventHandler):
         print(f"\nDetected new file: {filename}")
 
         try:
-            # Read all three context files to send to the Cloud Engine
             with open(SCHEMA_PATH, "r", encoding="utf-8") as sf:
                 schema_text = sf.read()
             with open(INDEX_PATH, "r", encoding="utf-8") as idxf:
@@ -717,12 +769,12 @@ class FileDropHandler(FileSystemEventHandler):
 
             with open(file_path, "rb") as f:
                 files = {"document": f}
-                data  = {
+                data = {
                     "schemaText": schema_text,
-                    "indexText":  index_text,
-                    "logTail":    log_tail,
+                    "indexText": index_text,
+                    "logTail": log_tail,
                 }
-                
+
                 headers = {"Authorization": f"Bearer {self.api_key}"}
 
                 print("  Uploading document and vault context to Cloud Engine...")
@@ -748,13 +800,16 @@ class FileDropHandler(FileSystemEventHandler):
 
 
 def startWatching(api_key):
+    global ACTIVE_OBSERVER
+
     bootstrap_wiki()
+    STOP_REQUESTED.clear()
 
     print("\n===============================")
     print("  Vault is ready.")
     print("===============================")
 
-    while True:
+    while not STOP_REQUESTED.is_set():
         print("\nVAULT MENU")
         print("1) Watch for new files")
         print("2) Query the wiki")
@@ -764,20 +819,25 @@ def startWatching(api_key):
 
         if choice == "1":
             event_handler = FileDropHandler(api_key)
-            observer      = Observer()
+            observer = Observer()
+            ACTIVE_OBSERVER = observer
+
             observer.schedule(event_handler, INPUT_FOLDER, recursive=True)
             observer.start()
 
             print(f"\n  Monitoring '{INPUT_FOLDER}' for new files.")
-            print(f"  Supported types: PDF, DOCX, TXT, HTML, MD")
+            print(f"  Supported types: PDF, DOCX, TXT, MD")
             print("  Press CTRL+C to stop watching and return to vault menu.\n")
 
             try:
-                while True:
+                while not STOP_REQUESTED.is_set():
                     time.sleep(1)
             except KeyboardInterrupt:
+                STOP_REQUESTED.set()
+            finally:
                 observer.stop()
                 observer.join()
+                ACTIVE_OBSERVER = None
                 print("\n\nWatcher paused.")
 
         elif choice == "2":
@@ -787,7 +847,6 @@ def startWatching(api_key):
             return
 
 
-# MENU ACTIONS 
 def action_login():
     print("\n--- LOGIN ---")
     local_key = get_local_key()
@@ -799,10 +858,12 @@ def action_login():
             print("Saved session expired. Please log in manually.")
 
     email = ask_user("Email")
-    if not email: return None
+    if not email:
+        return None
 
     password = ask_user("Password", is_password=True)
-    if not password: return None
+    if not password:
+        return None
 
     try:
         response = requests.post(
@@ -821,16 +882,20 @@ def action_login():
         print("Could not connect to the server.")
         return None
 
+
 def action_register():
     print("\n--- REGISTER ---")
     username = ask_user("Username")
-    if not username: return None
+    if not username:
+        return None
 
     email = ask_user("Email")
-    if not email: return None
+    if not email:
+        return None
 
     password = ask_user("Password", is_password=True)
-    if not password: return None
+    if not password:
+        return None
 
     if ALLOW_DEFAULT_LLM:
         print("\n(Optional) Bring your own Gemini API key for unlimited use.")
@@ -839,7 +904,8 @@ def action_register():
         print("\nRequired: You must provide your own Gemini API key to use this tool.")
         custom_key = ask_user("Custom LLM Key", is_password=True)
 
-    if not custom_key: return None
+    if not custom_key:
+        return None
 
     payload = {"username": username, "email": email, "password": password}
 
@@ -863,15 +929,18 @@ def action_register():
         print("Could not connect to the server.")
         return None
 
+
 def action_change_key():
     print("\n--- CHANGE CUSTOM LLM KEY ---")
     print("Please verify your account first.")
 
     email = ask_user("Email")
-    if not email: return None
+    if not email:
+        return None
 
     password = ask_user("Password", is_password=True)
-    if not password: return None
+    if not password:
+        return None
 
     try:
         login_res = requests.post(
@@ -886,9 +955,10 @@ def action_change_key():
         save_local_key(api_key)
 
         new_custom_key = ask_user("Enter your NEW Gemini API Key", is_password=True)
-        if not new_custom_key: return None
+        if not new_custom_key:
+            return None
 
-        headers    = {"Authorization": f"Bearer {api_key}"}
+        headers = {"Authorization": f"Bearer {api_key}"}
         update_res = requests.put(
             f"{SERVER_URL}/user/key",
             json={"customKey": new_custom_key},
@@ -907,7 +977,6 @@ def action_change_key():
         return None
 
 
-# MAIN MENU
 if __name__ == "__main__":
     print("\n===============================")
     print("    Welcome to LLM-Wiki CLI    ")

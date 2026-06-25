@@ -30,7 +30,6 @@ def safe_ack(ch, delivery_tag):
 
 
 def process_job_async(ch, connection, method, ticket):
-    
     jobId = ticket.get("jobId")
     originalFileName = ticket.get("original_filename")
     userKey = ticket.get("userApiKey")
@@ -43,53 +42,107 @@ def process_job_async(ch, connection, method, ticket):
 
     print(f" Processing Job [ JobID: {jobId} - FileName: {originalFileName} ]")
 
+    backend_updated = False
+
+    def report_progress(stage, stage_message):
+        try:
+            res = requests.put(
+                f"{SERVER_URL}/wiki/internal/job/{jobId}",
+                json={
+                    "status": "processing",
+                    "stage": stage,
+                    "stage_message": stage_message
+                },
+                timeout=10
+            )
+
+            if res.status_code != 200:
+                print("Server is busy at the moment. Please try again later.")
+                print(f" Progress update rejected by server for job {jobId}: {res.text}")
+        except Exception as net_err:
+            print("Server is busy at the moment. Please try again later.")
+            print(f" Could not send progress update for job {jobId}: {net_err}")
+
     try:
-        # Execute  core Gemini logic inside  thread
+        report_progress("starting", f"Starting ingest for {originalFileName}")
         plan = generate_integration_plan(
             file_path,
             userKey,
             originalFileName,
             schema_text,
             index_text,
-            log_tail
+            log_tail,
+            progress_callback=report_progress
         )
 
         payload = {
             "status": "completed",
             "plan": plan
         }
-        res = requests.put(f"{SERVER_URL}/wiki/internal/job/{jobId}", json=payload)
 
-        if res.status_code == 200:
-            print(f" Job {jobId} completed successfully for {originalFileName}")
-        else:
-            print(f" Job {jobId} result rejected by server: {res.text}")
+        try:
+            res = requests.put(
+                f"{SERVER_URL}/wiki/internal/job/{jobId}",
+                json=payload,
+                timeout=15
+            )
+
+            if res.status_code == 200:
+                backend_updated = True
+                print(f" Job {jobId} completed successfully for {originalFileName}")
+            else:
+                print("Server is busy at the moment. Please try again later.")
+                print(f" Job {jobId} result rejected by server: {res.text}")
+
+        except Exception as net_err:
+            print("Server is busy at the moment. Please try again later.")
+            print(f" Could not notify backend server of success for job {jobId}: {net_err}")
 
     except Exception as e:
         print(f" AI processing failed for job {jobId}: {e}")
+
         try:
             payload = {
                 "status": "failed",
-                "error" : str(e)
+                "stage": "failed",
+                "stage_message": f"Job failed for {originalFileName}",
+                "error": str(e)
             }
-            requests.put(f"{SERVER_URL}/wiki/internal/job/{jobId}", json=payload)
+
+            res = requests.put(
+                f"{SERVER_URL}/wiki/internal/job/{jobId}",
+                json=payload,
+                timeout=15
+            )
+
+            if res.status_code == 200:
+                backend_updated = True
+            else:
+                print("Server is busy at the moment. Please try again later.")
+                print(f" Job {jobId} failure update rejected by server: {res.text}")
+
         except Exception as net_err:
-            print(f"Could not notify backend server of failure for job {jobId}: {net_err}")
+            print("Server is busy at the moment. Please try again later.")
+            print(f" Could not notify backend server of failure for job {jobId}: {net_err}")
 
     finally:
-        # Clean up the disk 
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                print(f"Cleaned up temporary file for job {jobId}")
-            except Exception as file_err:
-                print(f"Failed to remove temp file {file_path}: {file_err}")
+        if backend_updated:
+            print(f"Temp file path resolved to: {file_path}")
+            print(f"Exists before cleanup: {os.path.exists(file_path)}")
+            if os.path.exists(file_path):
+                try:
+                    print(f"Deleting temp file: {file_path}")
+                    os.remove(file_path)
+                    print(f"Exists after cleanup: {os.path.exists(file_path)}")
+                    print(f"Cleaned up temporary file for job {jobId}")
+                except Exception as file_err:
+                    print(f"Failed to remove temp file {file_path}: {file_err}")
 
-        # Schedule acknowledgment 
-        connection.add_callback_threadsafe(
-            functools.partial(safe_ack, ch, method.delivery_tag)
-        )
-
+            connection.add_callback_threadsafe(
+                functools.partial(safe_ack, ch, method.delivery_tag)
+            )
+        else:
+            print(f"Leaving job {jobId} unacked so RabbitMQ can redeliver it later.")
 
 def callback(ch, method, properties, body):
     

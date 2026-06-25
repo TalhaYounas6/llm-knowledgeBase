@@ -49,21 +49,24 @@ export const getJobStatusController = asyncHandler(async(req,res)=>{
     const {jobId} = req.params;
 
     const job = await jobStatus(jobId,req.user.id);
+    const jobData = job.markdown_result || {};
 
     return res.status(200).json({
         id: job.id,
         status: job.status, 
         filename: job.original_filename,
-        markdown_content: job.status === 'completed' ? job.markdown_result : null,
+        markdown_content: jobData,
+        stage: jobData.stage ?? null,
+        stage_message: jobData.stage_message ?? null,
         error_message: job.error_message ?? null
     })
 })
 
 export const completeJobController = asyncHandler(async(req,res)=>{
     const {jobId} = req.params;
-    const { plan,status,error} = req.body;
+    const { plan,status,error,stage,stage_message} = req.body;
 
-    await completeJob(jobId,status,plan,error);
+    await completeJob(jobId,status,plan,error,stage,stage_message);
 
     res.status(200).json({message:"Job updated successfully"});
 })
@@ -73,5 +76,5 @@ export const deleteJobController = asyncHandler(async(req,res)=>{
     
     await deleteJob(jobId,req.user.id);
 
-    res.status(200).json({message:"Job deleted successfully after completion"});
+    res.status(200).json({message:"Job deleted successfully after finalization"});
 })
