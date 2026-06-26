@@ -23,6 +23,32 @@ STOP_REQUESTED = threading.Event()
 ACTIVE_OBSERVER = None
 
 
+ALLOWED_EXTENSIONS = {".pdf", ".txt", ".ppt", ".docx", ".md"}
+MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
+
+def validate_upload(file_path):
+    filename = os.path.basename(file_path)
+    _, ext = os.path.splitext(filename)
+    ext = ext.lower()
+
+    if ext not in ALLOWED_EXTENSIONS:
+        return False, (
+            f"Unsupported file type: {ext or 'no extension'}. "
+            f"Allowed types are: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+        )
+
+    try:
+        file_size = os.path.getsize(file_path)
+    except OSError as e:
+        return False, f"Could not read file size for {filename}: {e}"
+
+    if file_size > MAX_UPLOAD_SIZE_BYTES:
+        max_mb = MAX_UPLOAD_SIZE_BYTES / (1024 * 1024)
+        size_mb = file_size / (1024 * 1024)
+        return False, f"File too large: {size_mb:.2f} MB. Maximum allowed is {max_mb:.0f} MB."
+
+    return True, None
+
 def _handle_sigint(signum, frame):
     STOP_REQUESTED.set()
     print("\nInterrupt received. Stopping current operation...")
@@ -751,13 +777,22 @@ class FileDropHandler(FileSystemEventHandler):
         file_path = event.src_path
         filename = os.path.basename(file_path)
 
-        supported = {".pdf", ".docx", ".txt", ".md"}
-        _, ext = os.path.splitext(filename)
-        if ext.lower() not in supported:
-            print(f"\n  Skipped unsupported file type: {filename}")
-            return
+        # supported = {".pdf", ".docx", ".txt", ".md"}
+
+        # _, ext = os.path.splitext(filename)
+        # if ext.lower() not in supported:
+        #     print(f"\n  Skipped unsupported file type: {filename}")
+        #     return
+        
 
         print(f"\nDetected new file: {filename}")
+
+        valid, reason = validate_upload(file_path)
+        if not valid:
+            print(f"\n  Rejected file: {filename}")
+            print(f"  Reason: {reason}")
+            append_to_log("INGEST", f"REJECTED: {filename}", [])
+            return
 
         try:
             with open(SCHEMA_PATH, "r", encoding="utf-8") as sf:
@@ -826,7 +861,7 @@ def startWatching(api_key):
             observer.start()
 
             print(f"\n  Monitoring '{INPUT_FOLDER}' for new files.")
-            print(f"  Supported types: PDF, DOCX, TXT, MD")
+            print(f"  File Size Limit: 5mb and Supported types: PDF, DOCX, TXT, MD, PPT")
             print("  Press CTRL+C to stop watching and return to vault menu.\n")
 
             try:
