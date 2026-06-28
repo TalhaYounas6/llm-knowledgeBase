@@ -1,12 +1,14 @@
-import pika
 import json
-import requests
 import os
 import time
-from dotenv import load_dotenv
-from engine import generate_integration_plan
+import requests
 import concurrent.futures
 import functools
+import boto3
+import pika
+from botocore.exceptions import BotoCoreError, ClientError
+from dotenv import load_dotenv
+from engine import generate_integration_plan
 
 load_dotenv(dotenv_path="../.env")
 
@@ -15,7 +17,7 @@ SERVER_URL = os.getenv("SERVER_URL")
 PROCESS_TIMEOUT_DURATION = 300  
 CONCURRENT_LIMIT = 5  
 
-print(f"Connecting to RabbitMQ: {RABBITMQ_URL}")
+print(f"Connecting to RabbitMQ")
 
 # shared global ThreadPoolExecutor 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_LIMIT)
@@ -29,12 +31,38 @@ def safe_ack(ch, delivery_tag):
         print(f"Failed to acknowledge message thread-safely: {e}")
 
 
+AWS_REGION = os.getenv("AWS_REGION")
+s3 = boto3.client("s3", region_name=AWS_REGION)
+
+
+
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_LIMIT)
+
+
+def safe_ack(ch, delivery_tag):
+    try:
+        ch.basic_ack(delivery_tag=delivery_tag)
+    except Exception as e:
+        print(f"Failed to acknowledge message thread-safely: {e}")
+
+
+def delete_s3_object(bucket, key):
+    if not bucket or not key:
+        return
+
+    try:
+        s3.delete_object(Bucket=bucket, Key=key)
+        print(f"Deleted S3 object: s3://{bucket}/{key}")
+    except Exception as e:
+        print(f"Failed to delete S3 object s3://{bucket}/{key}: {e}")
+
+
 def process_job_async(ch, connection, method, ticket):
     jobId = ticket.get("jobId")
     originalFileName = ticket.get("original_filename")
     userKey = ticket.get("userApiKey")
-    relative_path = ticket.get("filePath")
-    file_path = os.path.abspath(os.path.join("..", relative_path))
+    s3_bucket = ticket.get("s3Bucket")
+    s3_key = ticket.get("s3Key")
 
     schema_text = ticket.get("schemaText", "")
     index_text = ticket.get("indexText", "")
@@ -51,9 +79,9 @@ def process_job_async(ch, connection, method, ticket):
                 json={
                     "status": "processing",
                     "stage": stage,
-                    "stage_message": stage_message
+                    "stage_message": stage_message,
                 },
-                timeout=10
+                timeout=10,
             )
 
             if res.status_code != 200:
@@ -65,26 +93,28 @@ def process_job_async(ch, connection, method, ticket):
 
     try:
         report_progress("starting", f"Starting ingest for {originalFileName}")
+
         plan = generate_integration_plan(
-            file_path,
+            s3_bucket,
+            s3_key,
             userKey,
             originalFileName,
             schema_text,
             index_text,
             log_tail,
-            progress_callback=report_progress
+            progress_callback=report_progress,
         )
 
         payload = {
             "status": "completed",
-            "plan": plan
+            "plan": plan,
         }
 
         try:
             res = requests.put(
                 f"{SERVER_URL}/wiki/internal/job/{jobId}",
                 json=payload,
-                timeout=15
+                timeout=15,
             )
 
             if res.status_code == 200:
@@ -106,13 +136,13 @@ def process_job_async(ch, connection, method, ticket):
                 "status": "failed",
                 "stage": "failed",
                 "stage_message": f"Job failed for {originalFileName}",
-                "error": str(e)
+                "error": str(e),
             }
 
             res = requests.put(
                 f"{SERVER_URL}/wiki/internal/job/{jobId}",
                 json=payload,
-                timeout=15
+                timeout=15,
             )
 
             if res.status_code == 200:
@@ -127,16 +157,7 @@ def process_job_async(ch, connection, method, ticket):
 
     finally:
         if backend_updated:
-            print(f"Temp file path resolved to: {file_path}")
-            print(f"Exists before cleanup: {os.path.exists(file_path)}")
-            if os.path.exists(file_path):
-                try:
-                    print(f"Deleting temp file: {file_path}")
-                    os.remove(file_path)
-                    print(f"Exists after cleanup: {os.path.exists(file_path)}")
-                    print(f"Cleaned up temporary file for job {jobId}")
-                except Exception as file_err:
-                    print(f"Failed to remove temp file {file_path}: {file_err}")
+            delete_s3_object(s3_bucket, s3_key)
 
             connection.add_callback_threadsafe(
                 functools.partial(safe_ack, ch, method.delivery_tag)

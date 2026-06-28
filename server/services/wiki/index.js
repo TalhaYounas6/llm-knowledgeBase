@@ -4,66 +4,68 @@ const { User, IngestJob } = require("../../models/index.cjs");
 import { getQueueChannel } from '../../config/rabbitMqueue.js';
 import { chatAi} from '../../config/gemini.js';
 import { decrypt } from '../../utils/crypto.js';
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import crypto from "crypto";
+import path from "path";
 
 
+// export const ingestFileService = async (userId, file, schemaText, indexText, logTail) => {
+//   const user = await User.findByPk(userId);
 
-export const ingestFileService = async (userId, file, schemaText, indexText, logTail) => {
-  const user = await User.findByPk(userId);
+//   if (user.tier === "free" && user.requests_today >= user.daily_limit) {
+//     throw new Error("Monthly quota exceeded");
+//   }
 
-  if (user.tier === "free" && user.requests_today >= user.daily_limit) {
-    throw new Error("Monthly quota exceeded");
-  }
+//   user.requests_today = user.requests_today + 1;
+//   await user.save();
 
-  user.requests_today = user.requests_today + 1;
-  await user.save();
+//   const newJob = await IngestJob.create({
+//     userId: user.id,
+//     original_filename: file.originalname,
+//     status: "pending",
+//   });
 
-  const newJob = await IngestJob.create({
-    userId: user.id,
-    original_filename: file.originalname,
-    status: "pending",
-  });
+//   try {
+//     const queue = await getQueueChannel();
 
-  try {
-    const queue = await getQueueChannel();
+//     const jobTicket = {
+//       userId: user.id,
+//       jobId: newJob.id,
+//       filePath: file.path,
+//       original_filename: file.originalname,
+//       userApiKey: decrypt(user.encrypted_custom_key),
+//       schemaText,
+//       indexText,
+//       logTail,
+//     };
 
-    const jobTicket = {
-      userId: user.id,
-      jobId: newJob.id,
-      filePath: file.path,
-      original_filename: file.originalname,
-      userApiKey: decrypt(user.encrypted_custom_key),
-      schemaText,
-      indexText,
-      logTail,
-    };
+//     const accepted = queue.sendToQueue(
+//       "pdf_jobs",
+//       Buffer.from(JSON.stringify(jobTicket)),
+//       { persistent: true }
+//     );
 
-    const accepted = queue.sendToQueue(
-      "pdf_jobs",
-      Buffer.from(JSON.stringify(jobTicket)),
-      { persistent: true }
-    );
+//     if (!accepted) {
+//       throw new Error("RabbitMQ refused the message right now");
+//     }
 
-    if (!accepted) {
-      throw new Error("RabbitMQ refused the message right now");
-    }
+//     return {
+//       message: "File queued for processing",
+//       jobId: newJob.id,
+//       fileName: file.originalname,
+//     };
+//   } catch (err) {
+//     await newJob.update({
+//       status: "failed",
+//       error_message: `Queue publish failed: ${err.message}`,
+//     });
 
-    return {
-      message: "File queued for processing",
-      jobId: newJob.id,
-      fileName: file.originalname,
-    };
-  } catch (err) {
-    await newJob.update({
-      status: "failed",
-      error_message: `Queue publish failed: ${err.message}`,
-    });
+//     user.requests_today = Math.max(0, user.requests_today - 1);
+//     await user.save();
 
-    user.requests_today = Math.max(0, user.requests_today - 1);
-    await user.save();
-
-    throw err;
-  }
-};
+//     throw err;
+//   }
+// };
 export const queryWikiService = async (
     userId,
     question,
@@ -106,8 +108,8 @@ QUERY TYPES — detect and handle accordingly:
 
 "IF PAGES ARE MISSING:\n"
 "If a page you need is not in PAGE CONTENTS below, do NOT attempt to answer.\n"
-"Output ONLY this exact line and nothing else:\n"
-"MISSING_PAGES: filename1.md, filename2.md\n"
+"Output ONLY valid JSON and nothing else, in exactly this shape:\n"
+"{\"missing_pages\":[\"filename1.md\",\"filename2.md\"]}\n"
 "Use the exact filenames as they appear in [[wikilinks]] in the index.\n"
 "Do not write any explanation. Do not attempt a partial answer.\n"
 "Just the MISSING_PAGES line and stop.\n\n"
@@ -165,27 +167,30 @@ ${question}
         // Detect missing pages the LLM flagged
         // If the model says it needs a page not in pageContents,
         // extract those page names and return them so client can fetch and retry
-       const answer = text.trim();
+        const answer = text.trim();
 
-        // check if the entire response is a MISSING_PAGES signal
-        if (answer.startsWith("MISSING_PAGES:")) {
-            const pageList = answer.replace("MISSING_PAGES:", "").trim();
-            const missingPages = pageList
-                .split(",")
-                .map(p => p.trim())
+        let parsed;
+        try {
+            parsed = JSON.parse(answer);
+        } catch {
+            parsed = null;
+        }
+
+        if (parsed && Array.isArray(parsed.missing_pages)) {
+            const missingPages = parsed.missing_pages
+                .map(p => String(p).trim())
                 .filter(Boolean);
 
             user.requests_today += 1;
             await user.save();
 
             return {
-                answer:       null,
-                status:       "missing_pages",
-                missingPages: missingPages
+                answer: null,
+                status: "missing_pages",
+                missingPages
             };
         }
-
-        // normal answer — no missing pages
+        // normal answer, no missing pages
         user.requests_today += 1;
         await user.save();
 
@@ -254,3 +259,133 @@ export const deleteJob = async(jobId,userId)=>{
   }
     await IngestJob.destroy({ where: { id: job.id } });
 }
+
+
+const s3 = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
+});
+
+const S3_BUCKET = process.env.AWS_BUCKET_NAME;
+
+function buildS3Key(userId, originalFilename) {
+  const ext = path.extname(originalFilename).toLowerCase();
+  const base = path
+    .basename(originalFilename, ext)
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  const unique = crypto.randomUUID();
+  return `ingest/${userId}/${unique}_${base || "upload"}${ext}`;
+}
+
+async function uploadToS3(file, userId) {
+  if (!S3_BUCKET) {
+    throw new Error("AWS_S3_BUCKET is not configured");
+  }
+
+  const key = buildS3Key(userId, file.originalname);
+
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      Body: file.buffer,
+      ContentType: file.mimetype || "application/octet-stream",
+      Metadata: {
+        original_filename: file.originalname,
+        user_id: String(userId),
+      },
+    })
+  );
+
+  return {
+    bucket: S3_BUCKET,
+    key,
+    contentType: file.mimetype || "application/octet-stream",
+    size: file.size ?? file.buffer?.length ?? 0,
+  };
+}
+
+async function deleteS3Object(bucket, key) {
+  try {
+    await s3.send(
+      new DeleteObjectCommand({
+        Bucket: bucket,
+        Key: key,
+      })
+    );
+  } catch (err) {
+    console.error("Failed to delete S3 object:", err);
+  }
+}
+
+export const ingestFileService = async (userId, file, schemaText, indexText, logTail) => {
+  const user = await User.findByPk(userId);
+
+  if (user.tier === "free" && user.requests_today >= user.daily_limit) {
+    throw new Error("Monthly quota exceeded");
+  }
+
+  user.requests_today = user.requests_today + 1;
+  await user.save();
+
+  let uploadedObject = null;
+
+  try {
+    uploadedObject = await uploadToS3(file, user.id);
+
+    const newJob = await IngestJob.create({
+      userId: user.id,
+      original_filename: file.originalname,
+      status: "pending",
+    });
+
+    const queue = await getQueueChannel();
+
+    const jobTicket = {
+      userId: user.id,
+      jobId: newJob.id,
+      s3Bucket: uploadedObject.bucket,
+      s3Key: uploadedObject.key,
+      original_filename: file.originalname,
+      fileSize: uploadedObject.size,
+      contentType: uploadedObject.contentType,
+      userApiKey: decrypt(user.encrypted_custom_key),
+      schemaText,
+      indexText,
+      logTail,
+    };
+
+    const accepted = queue.sendToQueue(
+      "pdf_jobs",
+      Buffer.from(JSON.stringify(jobTicket)),
+      { persistent: true }
+    );
+
+    if (!accepted) {
+      throw new Error("RabbitMQ refused the message right now");
+    }
+
+    return {
+      message: "File queued for processing",
+      jobId: newJob.id,
+      fileName: file.originalname,
+      s3Bucket: uploadedObject.bucket,
+      s3Key: uploadedObject.key,
+    };
+  } catch (err) {
+    if (uploadedObject) {
+      await deleteS3Object(uploadedObject.bucket, uploadedObject.key);
+    }
+
+    user.requests_today = Math.max(0, user.requests_today - 1);
+    await user.save();
+
+    throw err;
+  }
+};

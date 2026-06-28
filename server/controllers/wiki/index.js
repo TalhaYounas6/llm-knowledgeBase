@@ -1,6 +1,6 @@
 import asyncHandler from "express-async-handler";
 import { completeJob, deleteJob, ingestFileService,jobStatus,queryWikiService } from "../../services/wiki/index.js";
-import { error } from "console";
+
 
 export const ingestController = asyncHandler(async(req,res)=>{
     

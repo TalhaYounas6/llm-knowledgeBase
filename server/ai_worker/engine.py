@@ -10,6 +10,28 @@ from langchain_core.prompts import ChatPromptTemplate
 from google.genai.types import HarmCategory, HarmBlockThreshold
 from google import genai as google_genai
 from markitdown import MarkItDown
+import tempfile
+from pathlib import Path
+import boto3
+import json
+
+AWS_REGION = os.getenv("AWS_REGION")
+s3 = boto3.client("s3", region_name=AWS_REGION)
+
+
+def download_s3_object_to_tempfile(bucket: str, key: str, original_filename: str) -> str:
+    suffix = Path(original_filename).suffix or ""
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    temp_path = tmp.name
+    tmp.close()
+
+    try:
+        s3.download_file(bucket, key, temp_path)
+        return temp_path
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
 
 
 class DocumentClassification(BaseModel):
@@ -443,7 +465,8 @@ def build_meta_system_prompt() -> str:
 
 
 def generate_integration_plan(
-    file_path: str,
+    s3_bucket: str,
+    s3_key: str,
     user_key: str,
     original_filename: str,
     schema_text: str,
@@ -459,192 +482,209 @@ def generate_integration_plan(
         except Exception as callback_error:
             print(f"  Progress callback failed: {callback_error}")
 
-    # Using original temp file path directly
-    text_preview = extract_preview(file_path)
-
-    emit_progress("uploading", f"Uploading {original_filename} to Server")
-    gemini_file = upload_to_gemini(file_path, user_key, original_filename)
-
-    file_size_bytes   = os.path.getsize(file_path)
-    estimated_input   = file_size_bytes // 3
-    total_char_budget = max(8000, min(60000, int(estimated_input * 0.45)))
-
-    print(f"  Total char budget:       {total_char_budget:,}")
-
-    note_filename = os.path.splitext(original_filename)[0]
-    note_filename = re.sub(r'\s*-\s*Copy$', '', note_filename, flags=re.IGNORECASE)
-    note_filename = note_filename.replace(" ", "_")
-
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    safety = {
-        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_HATE_SPEECH:        HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_HARASSMENT:         HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT:  HarmBlockThreshold.BLOCK_NONE,
-    }
-
-    classify_llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        google_api_key=user_key,
-        temperature=0.1,
-        max_output_tokens=1024,
-        safety_settings=safety
-    )
-    structured_classify_llm = classify_llm.with_structured_output(DocumentClassification)
-    classify_prompt = ChatPromptTemplate.from_messages([
-        ("user", build_classification_prompt()),
-    ])
-    classify_chain = classify_prompt | structured_classify_llm
-
-    print(f"  Brain [1/3]: Classifying '{original_filename}'...")
-    emit_progress("classifying", f"Classifying {original_filename}")
-    classification = classify_chain.invoke({
-        "raw_text_preview": text_preview
-    })
-
-    doc_type           = classification.doc_type
-    suggested_sections = ", ".join(classification.suggested_sections)
-    num_sections       = len(classification.suggested_sections)
-
-    per_section_budget = max(500, total_char_budget // max(1, num_sections))
-
-    print(f"  Detected type:     {doc_type}")
-    print(f"  Sections:          {suggested_sections}")
-    print(f"  Per-section budget: {per_section_budget:,} chars")
-
-    emit_progress("generating_note", f"Generating structured note for {original_filename}")
-    client = google_genai.Client(api_key=user_key)
-
-    system_prompt = build_note_generation_prompt().format(
-        schema=schema_text,
-        suggested_sections=suggested_sections,
-        total_char_budget=f"{total_char_budget:,}",
-    )
-
-    user_message = (
-        f"Original filename: {original_filename}\n"
-        f"Wiki page filename: {note_filename}\n"
-        f"Per-section character target: {per_section_budget:,} characters per section body.\n"
-        f"Major sections may use up to 1.5x this. Minor sections 0.5x this."
-    )
-
-    print(f"  Brain [2/3]: Generating structured note for '{original_filename}'...")
-
-    wiki_note  = None
+    temp_file_path = None
+    gemini_file = None
+    wiki_note = None
     last_error = None
 
-    for attempt in range(3):
-        try:
-            from google.genai import types as genai_types
+    try:
+        emit_progress("downloading", f"Downloading {original_filename} from S3")
+        temp_file_path = download_s3_object_to_tempfile(
+            s3_bucket,
+            s3_key,
+            original_filename
+        )
 
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[
-                    genai_types.Content(
-                        role="user",
-                        parts=[
-                            genai_types.Part.from_uri(
-                                file_uri=gemini_file.uri,
-                                mime_type=gemini_file.mime_type
+        text_preview = extract_preview(temp_file_path)
+
+        emit_progress("uploading", f"Uploading {original_filename} to Gemini")
+        gemini_file = upload_to_gemini(temp_file_path, user_key, original_filename)
+
+        file_size_bytes = os.path.getsize(temp_file_path)
+        estimated_input = file_size_bytes // 3
+        total_char_budget = max(8000, min(60000, int(estimated_input * 0.45)))
+
+        print(f"  Total char budget:       {total_char_budget:,}")
+
+        note_filename = os.path.splitext(original_filename)[0]
+        note_filename = re.sub(r'\s*-\s*Copy$', '', note_filename, flags=re.IGNORECASE)
+        note_filename = note_filename.replace(" ", "_")
+
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        safety = {
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH:        HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HARASSMENT:         HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT:  HarmBlockThreshold.BLOCK_NONE,
+        }
+
+        classify_llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=user_key,
+            temperature=0.1,
+            max_output_tokens=1024,
+            safety_settings=safety
+        )
+        structured_classify_llm = classify_llm.with_structured_output(DocumentClassification)
+        classify_prompt = ChatPromptTemplate.from_messages([
+            ("user", build_classification_prompt()),
+        ])
+        classify_chain = classify_prompt | structured_classify_llm
+
+        print(f"  Brain [1/3]: Classifying '{original_filename}'...")
+        emit_progress("classifying", f"Classifying {original_filename}")
+        classification = classify_chain.invoke({
+            "raw_text_preview": text_preview
+        })
+
+        doc_type = classification.doc_type
+        suggested_sections = ", ".join(classification.suggested_sections)
+        num_sections = len(classification.suggested_sections)
+
+        per_section_budget = max(500, total_char_budget // max(1, num_sections))
+
+        print(f"  Detected type:     {doc_type}")
+        print(f"  Sections:          {suggested_sections}")
+        print(f"  Per-section budget: {per_section_budget:,} chars")
+
+        emit_progress("generating_note", f"Generating structured note for {original_filename}")
+        client = google_genai.Client(api_key=user_key)
+
+        system_prompt = build_note_generation_prompt().format(
+            schema=schema_text,
+            suggested_sections=suggested_sections,
+            total_char_budget=f"{total_char_budget:,}",
+        )
+
+        user_message = (
+            f"Original filename: {original_filename}\n"
+            f"Wiki page filename: {note_filename}\n"
+            f"Per-section character target: {per_section_budget:,} characters per section body.\n"
+            f"Major sections may use up to 1.5x this. Minor sections 0.5x this."
+        )
+
+        print(f"  Brain [2/3]: Generating structured note for '{original_filename}'...")
+
+        for attempt in range(3):
+            try:
+                from google.genai import types as genai_types
+
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[
+                                genai_types.Part.from_uri(
+                                    file_uri=gemini_file.uri,
+                                    mime_type=gemini_file.mime_type
+                                ),
+                                genai_types.Part.from_text(text=user_message),
+                            ]
+                        )
+                    ],
+                    config=genai_types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json",
+                        response_schema=WikiNote,
+                        max_output_tokens=65536,
+                        temperature=0.2,
+                        safety_settings=[
+                            genai_types.SafetySetting(
+                                category="HARM_CATEGORY_DANGEROUS_CONTENT",
+                                threshold="BLOCK_NONE"
                             ),
-                            genai_types.Part.from_text(text=user_message),
+                            genai_types.SafetySetting(
+                                category="HARM_CATEGORY_HATE_SPEECH",
+                                threshold="BLOCK_NONE"
+                            ),
+                            genai_types.SafetySetting(
+                                category="HARM_CATEGORY_HARASSMENT",
+                                threshold="BLOCK_NONE"
+                            ),
+                            genai_types.SafetySetting(
+                                category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                                threshold="BLOCK_NONE"
+                            ),
                         ]
                     )
-                ],
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    response_mime_type="application/json",
-                    response_schema=WikiNote,
-                    max_output_tokens=65536,
-                    temperature=0.2,
-                    safety_settings=[
-                        genai_types.SafetySetting(
-                            category="HARM_CATEGORY_DANGEROUS_CONTENT",
-                            threshold="BLOCK_NONE"
-                        ),
-                        genai_types.SafetySetting(
-                            category="HARM_CATEGORY_HATE_SPEECH",
-                            threshold="BLOCK_NONE"
-                        ),
-                        genai_types.SafetySetting(
-                            category="HARM_CATEGORY_HARASSMENT",
-                            threshold="BLOCK_NONE"
-                        ),
-                        genai_types.SafetySetting(
-                            category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                            threshold="BLOCK_NONE"
-                        ),
-                    ]
                 )
-            )
 
-            import json
-            raw_json  = response.text
-            wiki_note = WikiNote.model_validate(json.loads(raw_json))
-            break
+                raw_json = response.text
+                wiki_note = WikiNote.model_validate(json.loads(raw_json))
+                break
 
-        except Exception as e:
-            last_error = e
-            print(f"  Attempt {attempt + 1} failed: {e}")
-            if attempt < 2:
-                print(f"  Retrying...")
+            except Exception as e:
+                last_error = e
+                print(f"  Attempt {attempt + 1} failed: {e}")
+                if attempt < 2:
+                    print("  Retrying...")
 
-    delete_gemini_file(gemini_file.name, user_key)
+        if wiki_note is None:
+            raise Exception(f"Note generation failed after 3 attempts. Last error: {last_error}")
 
-    if wiki_note is None:
-        raise Exception(f"Note generation failed after 3 attempts. Last error: {last_error}")
+        print(f"  Sections generated: {[s.heading for s in wiki_note.sections]}")
+        print(f"  Citations found:    {len(wiki_note.source_citations)}")
+        print(f"  See Also entries:   {len(wiki_note.see_also)}")
 
-    print(f"  Sections generated: {[s.heading for s in wiki_note.sections]}")
-    print(f"  Citations found:    {len(wiki_note.source_citations)}")
-    print(f"  See Also entries:   {len(wiki_note.see_also)}")
+        note_content = assemble_markdown(wiki_note, doc_type, today)
+        actual_chars = len(note_content)
 
-    note_content = assemble_markdown(wiki_note, doc_type, today)
-    actual_chars = len(note_content)
+        print(f"  Note chars:        {actual_chars:,}")
+        print(f"  Ratio:             {actual_chars / max(1, estimated_input):.2f}x estimated input")
 
-    print(f"  Note chars:        {actual_chars:,}")
-    print(f"  Ratio:             {actual_chars / max(1, estimated_input):.2f}x estimated input")
+        if actual_chars > estimated_input * 2:
+            print("  WARNING: Note may be verbose relative to input size.")
 
-    if actual_chars > estimated_input * 2:
-        print(f"  WARNING: Note may be verbose relative to input size.")
+        emit_progress("generating_metadata", f"Generating metadata for {original_filename}")
+        meta_llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=user_key,
+            temperature=0.1,
+            max_output_tokens=4096,
+            safety_settings=safety
+        )
+        structured_meta_llm = meta_llm.with_structured_output(WikiMetadata)
 
-    emit_progress("generating_metadata", f"Generating metadata for {original_filename}")
-    meta_llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        google_api_key=user_key,
-        temperature=0.1,
-        max_output_tokens=4096,
-        safety_settings=safety
-    )
-    structured_meta_llm = meta_llm.with_structured_output(WikiMetadata)
+        meta_prompt = ChatPromptTemplate.from_messages([
+            ("system", build_meta_system_prompt()),
+            ("user", (
+                "Wiki page filename: {note_filename}\n\n"
+                "COMPLETED NOTE:\n{note_content}"
+            ))
+        ])
 
-    meta_prompt = ChatPromptTemplate.from_messages([
-        ("system", build_meta_system_prompt()),
-        ("user", (
-            "Wiki page filename: {note_filename}\n\n"
-            "COMPLETED NOTE:\n{note_content}"
-        ))
-    ])
+        meta_chain = meta_prompt | structured_meta_llm
+        print(f"  Brain [3/3]: Generating metadata for '{original_filename}'...")
 
-    meta_chain = meta_prompt | structured_meta_llm
-    print(f"  Brain [3/3]: Generating metadata for '{original_filename}'...")
+        meta_result = meta_chain.invoke({
+            "index":         index_text,
+            "log_tail":      log_tail if log_tail else "No log entries yet.",
+            "today":         today,
+            "note_filename": note_filename,
+            "note_content":  note_content
+        })
 
-    meta_result = meta_chain.invoke({
-        "index":         index_text,
-        "log_tail":      log_tail if log_tail else "No log entries yet.",
-        "today":         today,
-        "note_filename": note_filename,
-        "note_content":  note_content
-    })
+        print(f"  Cross-links identified: {meta_result.cross_links}")
+        print(f"  Index category:         {meta_result.index_category}")
+        emit_progress("finalizing", f"Finalizing integration plan for {original_filename}")
 
-    print(f"  Cross-links identified: {meta_result.cross_links}")
-    print(f"  Index category:         {meta_result.index_category}")
-    emit_progress("finalizing", f"Finalizing integration plan for {original_filename}")
+        return {
+            "note_filename":  note_filename,
+            "note_content":   note_content,
+            "index_entry":    meta_result.index_entry,
+            "cross_links":    meta_result.cross_links,
+            "index_category": meta_result.index_category
+        }
 
-    return {
-        "note_filename":  note_filename,
-        "note_content":   note_content,
-        "index_entry":    meta_result.index_entry,
-        "cross_links":    meta_result.cross_links,
-        "index_category": meta_result.index_category
-    }
+    finally:
+        if gemini_file is not None:
+            delete_gemini_file(gemini_file.name, user_key)
+
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                print(f"  Cleaned up temp file: {temp_file_path}")
+            except Exception as e:
+                print(f"  Failed to clean up temp file {temp_file_path}: {e}")
