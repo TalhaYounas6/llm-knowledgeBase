@@ -11,7 +11,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # CONFIGURATION
-SERVER_URL = "http://localhost:3000"
+SERVER_URL = "https://llm-knowledgebase-production.up.railway.app/"
 CONFIG_FILE = "config.json"
 INPUT_FOLDER = "./Raw_Sources"
 OUTPUT_FOLDER = "./Wiki_Notes"
