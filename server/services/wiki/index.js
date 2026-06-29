@@ -168,13 +168,19 @@ ${question}
         // If the model says it needs a page not in pageContents,
         // extract those page names and return them so client can fetch and retry
         const answer = text.trim();
+        const cleaned = answer
+          .replace(/^```json\s*/i, "")
+          .replace(/^```\s*/i, "")
+          .replace(/\s*```$/i, "")
+          .trim();
 
         let parsed;
         try {
-            parsed = JSON.parse(answer);
+          parsed = JSON.parse(cleaned);
         } catch {
-            parsed = null;
+          parsed = null;
         }
+        
 
         if (parsed && Array.isArray(parsed.missing_pages)) {
             const missingPages = parsed.missing_pages
