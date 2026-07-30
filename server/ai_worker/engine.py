@@ -18,6 +18,25 @@ import json
 AWS_REGION = os.getenv("AWS_REGION")
 s3 = boto3.client("s3", region_name=AWS_REGION)
 
+def friendly_gemini_error_message(error: Exception) -> str:
+    message = str(error).lower()
+
+    if "api key" in message or "invalid argument" in message or "unauthorized" in message or "permission denied" in message:
+        return "Your Gemini API key appears to be invalid or unauthorized. Please check your key and try again."
+
+    if "too many requests" in message or "429" in message or "resource exhausted" in message:
+        return "Gemini is receiving too many requests right now. Please wait a moment and try again."
+
+    if "unavailable" in message or "service unavailable" in message or "model is unavailable" in message or "503" in message:
+        return "The Gemini model is currently unavailable. Retrying may help in a few moments."
+
+    if "deadline exceeded" in message or "timeout" in message:
+        return "The Gemini request timed out. The system may be busy or the document may be taking too long to process."
+
+    if "failed to parse" in message or "unterminated string" in message or "json" in message:
+        return "Gemini returned malformed structured output. Retrying the request may resolve it."
+
+    return f"Processing failed: {error}"
 
 def download_s3_object_to_tempfile(bucket: str, key: str, original_filename: str) -> str:
     suffix = Path(original_filename).suffix or ""
@@ -567,62 +586,76 @@ def generate_integration_plan(
         print(f"  Brain [2/3]: Generating structured note for '{original_filename}'...")
 
         for attempt in range(3):
-            try:
-                from google.genai import types as genai_types
+                    try:
+                        from google.genai import types as genai_types
 
-                response = client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=[
-                        genai_types.Content(
-                            role="user",
-                            parts=[
-                                genai_types.Part.from_uri(
-                                    file_uri=gemini_file.uri,
-                                    mime_type=gemini_file.mime_type
-                                ),
-                                genai_types.Part.from_text(text=user_message),
-                            ]
+                        if attempt > 0:
+                            emit_progress(
+                                "generating_note",
+                                f"Gemini had a temporary issue. Retrying attempt {attempt + 1} of 3..."
+                            )
+
+                        response = client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[
+                                genai_types.Content(
+                                    role="user",
+                                    parts=[
+                                        genai_types.Part.from_uri(
+                                            file_uri=gemini_file.uri,
+                                            mime_type=gemini_file.mime_type
+                                        ),
+                                        genai_types.Part.from_text(text=user_message),
+                                    ]
+                                )
+                            ],
+                            config=genai_types.GenerateContentConfig(
+                                system_instruction=system_prompt,
+                                response_mime_type="application/json",
+                                response_schema=WikiNote,
+                                max_output_tokens=65536,
+                                temperature=0.2,
+                                safety_settings=[
+                                    genai_types.SafetySetting(
+                                        category="HARM_CATEGORY_DANGEROUS_CONTENT",
+                                        threshold="BLOCK_NONE"
+                                    ),
+                                    genai_types.SafetySetting(
+                                        category="HARM_CATEGORY_HATE_SPEECH",
+                                        threshold="BLOCK_NONE"
+                                    ),
+                                    genai_types.SafetySetting(
+                                        category="HARM_CATEGORY_HARASSMENT",
+                                        threshold="BLOCK_NONE"
+                                    ),
+                                    genai_types.SafetySetting(
+                                        category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                                        threshold="BLOCK_NONE"
+                                    ),
+                                ]
+                            )
                         )
-                    ],
-                    config=genai_types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        response_mime_type="application/json",
-                        response_schema=WikiNote,
-                        max_output_tokens=65536,
-                        temperature=0.2,
-                        safety_settings=[
-                            genai_types.SafetySetting(
-                                category="HARM_CATEGORY_DANGEROUS_CONTENT",
-                                threshold="BLOCK_NONE"
-                            ),
-                            genai_types.SafetySetting(
-                                category="HARM_CATEGORY_HATE_SPEECH",
-                                threshold="BLOCK_NONE"
-                            ),
-                            genai_types.SafetySetting(
-                                category="HARM_CATEGORY_HARASSMENT",
-                                threshold="BLOCK_NONE"
-                            ),
-                            genai_types.SafetySetting(
-                                category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                                threshold="BLOCK_NONE"
-                            ),
-                        ]
-                    )
-                )
 
-                raw_json = response.text
-                wiki_note = WikiNote.model_validate(json.loads(raw_json))
-                break
+                        raw_json = response.text
+                        wiki_note = WikiNote.model_validate(json.loads(raw_json))
+                        break
 
-            except Exception as e:
-                last_error = e
-                print(f"  Attempt {attempt + 1} failed: {e}")
-                if attempt < 2:
-                    print("  Retrying...")
+                    except Exception as e:
+                        last_error = e
+                        user_message_text = friendly_gemini_error_message(e)
+
+                        print(f"  Attempt {attempt + 1} failed: {e}")
+
+                        emit_progress(
+                            "generating_note",
+                            f"{user_message_text} Attempt {attempt + 1} of 3 failed."
+                        )
+
+                        if attempt < 2:
+                            print("  Retrying...")
 
         if wiki_note is None:
-            raise Exception(f"Note generation failed after 3 attempts. Last error: {last_error}")
+            raise Exception(friendly_gemini_error_message(last_error))
 
         print(f"  Sections generated: {[s.heading for s in wiki_note.sections]}")
         print(f"  Citations found:    {len(wiki_note.source_citations)}")

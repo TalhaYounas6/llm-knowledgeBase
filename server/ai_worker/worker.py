@@ -135,7 +135,7 @@ def process_job_async(ch, connection, method, ticket):
             payload = {
                 "status": "failed",
                 "stage": "failed",
-                "stage_message": f"Job failed for {originalFileName}",
+                "stage_message": str(e),
                 "error": str(e),
             }
 
