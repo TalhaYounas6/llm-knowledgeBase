@@ -5,16 +5,20 @@ import re
 import signal
 import threading
 import requests
+from pathlib import Path
 import pwinput
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # CONFIGURATION
-SERVER_URL = "https://llm-knowledgebase-production.up.railway.app/"
-CONFIG_FILE = "config.json"
-INPUT_FOLDER = "./Raw_Sources"
-OUTPUT_FOLDER = "./Wiki_Notes"
+# This will resolve to something like: C:\Users\Talha\Documents\LLM_Wiki
+BASE_APP_DIR = Path.home() / "Documents" / "LLM_Wiki"
+# SERVER_URL = "https://llm-knowledgebase-production.up.railway.app/"
+SERVER_URL = "http://localhost:3000"
+CONFIG_FILE = str(BASE_APP_DIR / "config.json")
+INPUT_FOLDER = str(BASE_APP_DIR / "Raw_Sources")
+OUTPUT_FOLDER = str(BASE_APP_DIR / "Wiki_Notes")
 ALLOW_DEFAULT_LLM = False
 LOG_TAIL_LINES = 20
 
@@ -72,7 +76,7 @@ LOG_PATH = os.path.join(OUTPUT_FOLDER, "log.md")
 SCHEMA_PATH = os.path.join(OUTPUT_FOLDER, "SCHEMA.md")
 
 # Ensure all local directories exist
-for folder in [INPUT_FOLDER, OUTPUT_FOLDER, NOTES_DIR, CONCEPTS_DIR, ENTITIES_DIR]:
+for folder in [BASE_APP_DIR, INPUT_FOLDER, OUTPUT_FOLDER, NOTES_DIR, CONCEPTS_DIR, ENTITIES_DIR]:
     os.makedirs(folder, exist_ok=True)
 
 
