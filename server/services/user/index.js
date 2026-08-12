@@ -20,7 +20,7 @@ export const getUserStatus = async (userId) => {
 }
 
 export const changeApiKey = async(userId,customKey)=>{
-    const user = await User.findByPk(userId,{raw:true});
+    const user = await User.findByPk(userId);
     if (!user) {
         throw new Error("User not found");
     }

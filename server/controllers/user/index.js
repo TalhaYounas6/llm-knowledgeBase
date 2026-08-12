@@ -9,7 +9,7 @@ export const getStatusController = asyncHandler(async(req,res)=>{
 })
 
 export const changeApiKeyController = asyncHandler(async(req,res)=>{
-    const customKey = req.body;
+    const {customKey} = req.body;
 
     if(!customKey){
         const error = new Error("No custom API Key provided!");

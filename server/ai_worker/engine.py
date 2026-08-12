@@ -19,24 +19,29 @@ AWS_REGION = os.getenv("AWS_REGION")
 s3 = boto3.client("s3", region_name=AWS_REGION)
 
 def friendly_gemini_error_message(error: Exception) -> str:
-    message = str(error).lower()
+    text = str(error)
+    lowered = text.lower()
 
-    if "api key" in message or "invalid argument" in message or "unauthorized" in message or "permission denied" in message:
-        return "Your Gemini API key appears to be invalid or unauthorized. Please check your key and try again."
+    if "api_key_invalid" in lowered or "api key not valid" in lowered:
+        return "Your Gemini API key is invalid. Please check it and try again."
 
-    if "too many requests" in message or "429" in message or "resource exhausted" in message:
+    if "invalid_argument" in lowered and "api key" in lowered:
+        return "Your Gemini API key is invalid. Please check it and try again."
+
+    if "too many requests" in lowered or "429" in lowered or "resource exhausted" in lowered:
         return "Gemini is receiving too many requests right now. Please wait a moment and try again."
 
-    if "unavailable" in message or "service unavailable" in message or "model is unavailable" in message or "503" in message:
-        return "The Gemini model is currently unavailable. Retrying may help in a few moments."
+    if "unavailable" in lowered or "service unavailable" in lowered or "model is unavailable" in lowered or "503" in lowered:
+        return "The Gemini model is temporarily unavailable. Please try again in a few moments."
 
-    if "deadline exceeded" in message or "timeout" in message:
-        return "The Gemini request timed out. The system may be busy or the document may be taking too long to process."
+    if "deadline exceeded" in lowered or "timeout" in lowered:
+        return "The Gemini request timed out. Please try again."
 
-    if "failed to parse" in message or "unterminated string" in message or "json" in message:
-        return "Gemini returned malformed structured output. Retrying the request may resolve it."
+    if "unterminated string" in lowered or "failed to parse" in lowered or "json" in lowered:
+        return "Gemini returned malformed structured output. Retrying may help."
 
-    return f"Processing failed: {error}"
+    return "Processing failed due to a Gemini API error. Please try again."
+
 
 def download_s3_object_to_tempfile(bucket: str, key: str, original_filename: str) -> str:
     suffix = Path(original_filename).suffix or ""
@@ -710,7 +715,8 @@ def generate_integration_plan(
             "cross_links":    meta_result.cross_links,
             "index_category": meta_result.index_category
         }
-
+    except Exception as e:
+        raise Exception(friendly_gemini_error_message(e)) from e
     finally:
         if gemini_file is not None:
             delete_gemini_file(gemini_file.name, user_key)
