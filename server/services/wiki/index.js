@@ -76,7 +76,9 @@ export const queryWikiService = async (
     const user = await User.findByPk(userId);
     if (!user) throw new Error("User not found");
     if (user.tier === "free" && user.requests_today >= user.daily_limit) {
-        throw new Error("Daily quota exceeded");
+        const error = new Error("Daily Quota Exceeded");
+        error.statusCode = 429;
+        throw error;
     }
 
     const key   = decrypt(user.encrypted_custom_key);
@@ -334,7 +336,9 @@ export const ingestFileService = async (userId, file, schemaText, indexText, log
   const user = await User.findByPk(userId);
 
   if (user.tier === "free" && user.requests_today >= user.daily_limit) {
-    throw new Error("Monthly quota exceeded");
+    const error = new Error("Daily quota exceeded");
+    error.statusCode = 429;
+    throw error;
   }
 
   user.requests_today = user.requests_today + 1;

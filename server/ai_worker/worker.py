@@ -139,8 +139,13 @@ def process_job_async(ch, connection, method, ticket):
                 "error": str(e),
             }
 
+            headers = {
+                "x-worker-secret": os.environ["WORKER_SECRET"]
+            }
+
             res = requests.put(
                 f"{SERVER_URL}/wiki/internal/job/{jobId}",
+                headers=headers,
                 json=payload,
                 timeout=15,
             )

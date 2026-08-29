@@ -15,22 +15,33 @@ const { User } = require("../models/index.cjs");
             const user = await User.findOne({where:{api_key:token},raw:true});
 
         if(!user){
-            res.status(401);
-            throw new Error("Not authorized!")
+            const error = new Error("No token provided");
+            error.statusCode = 401;
+            throw error;
         }
 
          req.user = user;
          next();
             
         } catch (error) {
-            res.status(401);
-            throw new Error("Not authorized, token failed");
+            error.statusCode = 401
+            throw error;
         }
         
     }
 
         if(!token){
-            res.status(401);
-            throw new Error("Not token provided!")
+            const error = new Error("No token provided");
+            error.statusCode = 401;
+            throw error;
         } 
+ })
+
+ export const protectWorker = asyncHandler(async(req,res,next)=>{
+    if(req.headers["x-worker-secret"] && req.headers["x-worker-secret"] == process.env.WORKER_SECRET){
+        next();
+    }
+    else{
+        return res.status(401).json({"message" : "Not authorized for this action"});
+    }
  })
