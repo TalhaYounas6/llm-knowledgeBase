@@ -132,11 +132,12 @@ def process_job_async(ch, connection, method, ticket):
         print(f" AI processing failed for job {jobId}: {e}")
 
         try:
+            friendly_error = str(e).strip()
             payload = {
                 "status": "failed",
                 "stage": "failed",
-                "stage_message": str(e),
-                "error": str(e),
+                "stage_message": friendly_error,
+                "error": friendly_error,
             }
 
             headers = {

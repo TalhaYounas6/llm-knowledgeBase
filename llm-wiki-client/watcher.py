@@ -701,12 +701,28 @@ def poll_for_result(job_id, api_key, original_filename):
                         break
 
                     elif status == "failed":
-                        if stage or stage_message:
-                            print(f"\n  Failed at stage: {stage or 'unknown'}")
-                            if stage_message:
-                                print(f"  Last message: {stage_message}")
-                        print(f"AI failed to process '{original_filename}'. Error: {error_msg}")
-                        append_to_log("INGEST", f"FAILED: {original_filename}", [])
+                        clean_error = (
+                            error_msg
+                            or stage_message
+                            or "The AI could not process this file."
+                        )
+
+                        print("\n" + "-" * 60)
+                        print("PROCESSING FAILED")
+                        print("-" * 60)
+                        print(f"File:   {original_filename}")
+
+                        if stage:
+                            print(f"Stage:  {stage}")
+
+                        print(f"Reason: {clean_error}")
+                        print("-" * 60)
+
+                        append_to_log(
+                            "INGEST",
+                            f"FAILED: {original_filename}",
+                            [],
+                        )
                         break
 
                     elif status in ("pending", "processing"):
