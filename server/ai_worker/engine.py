@@ -5,11 +5,8 @@ import os
 import re
 from datetime import datetime
 from pydantic import BaseModel, Field
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
 from google.genai.types import HarmCategory, HarmBlockThreshold
 from google import genai as google_genai
-from markitdown import MarkItDown
 import tempfile
 from pathlib import Path
 import boto3
@@ -181,6 +178,8 @@ class WikiMetadata(BaseModel):
 
 
 def extract_preview(file_path: str) -> str:
+    from markitdown import MarkItDown
+    
     md = MarkItDown()
     try:
         result = md.convert(file_path)
@@ -498,6 +497,9 @@ def generate_integration_plan(
     log_tail: str = "",
     progress_callback=None
 ):
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_core.prompts import ChatPromptTemplate
+
     def emit_progress(stage: str, stage_message: str):
         if progress_callback is None:
             return

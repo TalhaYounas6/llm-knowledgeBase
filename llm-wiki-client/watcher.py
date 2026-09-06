@@ -14,8 +14,8 @@ from watchdog.events import FileSystemEventHandler
 # CONFIGURATION
 # This will resolve to something like: C:\Users\Talha\Documents\LLM_Wiki
 BASE_APP_DIR = Path.home() / "Documents" / "LLM_Wiki"
-# SERVER_URL = "https://llm-knowledgebase-production.up.railway.app/"
-SERVER_URL = "http://localhost:3000"
+SERVER_URL = "https://llm-knowledgebase-production.up.railway.app/"
+# SERVER_URL = "http://localhost:3000"
 CONFIG_FILE = str(BASE_APP_DIR / "config.json")
 INPUT_FOLDER = str(BASE_APP_DIR / "Raw_Sources")
 OUTPUT_FOLDER = str(BASE_APP_DIR / "Wiki_Notes")

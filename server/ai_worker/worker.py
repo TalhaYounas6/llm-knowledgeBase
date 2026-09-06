@@ -8,7 +8,7 @@ import boto3
 import pika
 from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
-from engine import generate_integration_plan
+
 
 load_dotenv(dotenv_path="../.env")
 
@@ -22,22 +22,8 @@ print(f"Connecting to RabbitMQ")
 # shared global ThreadPoolExecutor 
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_LIMIT)
 
-
-def safe_ack(ch, delivery_tag):
-    
-    try:
-        ch.basic_ack(delivery_tag=delivery_tag)
-    except Exception as e:
-        print(f"Failed to acknowledge message thread-safely: {e}")
-
-
 AWS_REGION = os.getenv("AWS_REGION")
 s3 = boto3.client("s3", region_name=AWS_REGION)
-
-
-
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=CONCURRENT_LIMIT)
-
 
 def safe_ack(ch, delivery_tag):
     try:
@@ -58,6 +44,8 @@ def delete_s3_object(bucket, key):
 
 
 def process_job_async(ch, connection, method, ticket):
+    from engine import generate_integration_plan
+    
     jobId = ticket.get("jobId")
     originalFileName = ticket.get("original_filename")
     userKey = ticket.get("userApiKey")
