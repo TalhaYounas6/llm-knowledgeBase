@@ -15,7 +15,11 @@ load_dotenv(dotenv_path="../.env")
 RABBITMQ_URL = os.getenv("QUEUE_URL")
 SERVER_URL = os.getenv("SERVER_URL")
 PROCESS_TIMEOUT_DURATION = 300  
-CONCURRENT_LIMIT = 5  
+CONCURRENT_LIMIT = 5
+
+headers = {
+                "x-worker-secret": os.getenv("WORKER_SECRET")
+          }
 
 print(f"Connecting to RabbitMQ")
 
@@ -69,6 +73,7 @@ def process_job_async(ch, connection, method, ticket):
                     "stage": stage,
                     "stage_message": stage_message,
                 },
+                headers=headers,
                 timeout=10,
             )
 
@@ -101,6 +106,7 @@ def process_job_async(ch, connection, method, ticket):
         try:
             res = requests.put(
                 f"{SERVER_URL}/wiki/internal/job/{jobId}",
+                headers=headers,
                 json=payload,
                 timeout=15,
             )
@@ -126,10 +132,6 @@ def process_job_async(ch, connection, method, ticket):
                 "stage": "failed",
                 "stage_message": friendly_error,
                 "error": friendly_error,
-            }
-
-            headers = {
-                "x-worker-secret": os.environ["WORKER_SECRET"]
             }
 
             res = requests.put(
